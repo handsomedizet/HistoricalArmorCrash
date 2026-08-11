@@ -13,7 +13,14 @@ from .mesh import MeshModel, build_mesh, iter_projectile_node_ids
 def _fmt(value: float | int) -> str:
     if isinstance(value, int):
         return str(value)
-    return f"{value:.9g}"
+    # LS-DYNA still applies a 10-character limit to individual values in many
+    # comma-delimited keyword cards. Use as much precision as fits instead of
+    # emitting long values such as ``7.45217606e-06`` (KEY+459).
+    for precision in range(9, 0, -1):
+        text = f"{value:.{precision}g}"
+        if len(text) <= 10:
+            return text
+    raise ValueError(f"Value cannot be represented in a 10-character LS-DYNA field: {value!r}")
 
 
 def _line(*values: float | int | str) -> str:
@@ -79,6 +86,15 @@ def build_case(config: StudyConfig, case: CaseSpec, case_dir: Path) -> dict[str,
         "projectile_mass_kg": projectile_mass,
         "projectile_mesh_volume_mm3": mesh.projectile_mesh_volume_mm3,
         "body_depth_mm": config.body.depth_mm,
+        "body_dimensions_mm": {
+            "width_mm": config.body.width_mm,
+            "depth_mm": config.body.depth_mm,
+            "height_mm": config.body.height_mm,
+        },
+        "body_material": asdict(config.body),
+        "armor_geometry": asdict(config.armor_geometry),
+        "armor_material": asdict(config.armors[case.armor_type]),
+        "projectile_material": asdict(config.projectile),
         "mesh_divisions": {"nx": nx, "ny": ny, "nz": nz, "scale": case.mesh_scale},
         "sensors": mesh.sensors,
         "history_elements": mesh.history_elements,

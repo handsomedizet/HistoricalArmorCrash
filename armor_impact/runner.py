@@ -12,8 +12,18 @@ import time
 from .config import SolverConfig
 
 
-NORMAL_TERMINATION = re.compile(r"normal\s+termination", re.IGNORECASE)
-FATAL_MARKERS = re.compile(r"error\s+termination|fatal\s+error|input\s+error", re.IGNORECASE)
+NORMAL_TERMINATION = re.compile(
+    r"normal\s+termination|n\s*o\s*r\s*m\s*a\s*l\s+t\s*e\s*r\s*m\s*i\s*n\s*a\s*t\s*i\s*o\s*n",
+    re.IGNORECASE,
+)
+FATAL_MARKERS = re.compile(
+    r"^\s*\*{3}\s*error\b"
+    r"|\b(?:fatal|input)\s+error\b"
+    r"|\berror\s+termination\b"
+    r"|e\s*r\s*r\s*o\s*r\s+t\s*e\s*r\s*m\s*i\s*n\s*a\s*t\s*i\s*o\s*n",
+    re.IGNORECASE,
+)
+EXPLANATORY_ERROR_TERMINATION = re.compile(r"\berror\s+termination\s+if\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -63,9 +73,18 @@ def _read_solver_text(case_dir: Path) -> str:
     return "\n".join(chunks)
 
 
+def _has_fatal_marker(text: str) -> bool:
+    for line in text.splitlines():
+        if EXPLANATORY_ERROR_TERMINATION.search(line):
+            continue
+        if FATAL_MARKERS.search(line):
+            return True
+    return False
+
+
 def inspect_case(case_dir: Path, return_code: int | None = None) -> tuple[str, str]:
     text = _read_solver_text(case_dir)
-    if FATAL_MARKERS.search(text):
+    if _has_fatal_marker(text):
         return "failed", "LS-DYNA reported an input or fatal error"
     if NORMAL_TERMINATION.search(text):
         if (case_dir / "nodout").is_file() or (case_dir / "binout").is_file():

@@ -1,0 +1,97 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "1. 설정 점검",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "doctor",
+                "--config",
+                "study.toml"
+            ]
+        },
+        {
+            "name": "2. 입력 모델 생성",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "build",
+                "--config",
+                "study.toml",
+                "--study-dir",
+                "runs"
+            ]
+        },
+        {
+            "name": "3. LS-DYNA 실행 명령 점검",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "run",
+                "--config",
+                "study.toml",
+                "--study-dir",
+                "runs",
+                "--dry-run"
+            ]
+        },
+        {
+            "name": "4. 실제 LS-DYNA 해석",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "LSTC_LICENSE": "ANSYS"
+            },
+            "args": [
+                "run",
+                "--config",
+                "study.toml",
+                "--study-dir",
+                "runs"
+            ]
+        },
+        {
+            "name": "5. 결과 분석",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "analyze",
+                "--config",
+                "study.toml",
+                "--study-dir",
+                "runs"
+            ]
+        },
+        {
+            "name": "전체 자동 실행",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "all",
+                "--config",
+                "study.toml",
+                "--study-dir",
+                "runs"
+            ]
+        }
+    ]
+}
