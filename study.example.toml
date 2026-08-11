@@ -1,0 +1,70 @@
+# Copy this file to study.toml and edit the solver path and study inputs.
+
+[solver]
+executable = "C:\\LS-DYNA\\ls-dyna_smp_d.exe"
+ncpus = 2
+memory_mb = 2048
+timeout_minutes = 120
+
+[study]
+# Cartesian product: the example below builds 2 armor x 2 caliber x 2 speed = 8 cases.
+armor_types = ["plate", "dujeong_equivalent"]
+caliber_mm = [80.0, 120.0]
+speed_mps = [150.0, 250.0]
+yaw_deg = [0.0]
+pitch_deg = [0.0]
+impact_x_mm = [0.0]
+impact_z_mm = [0.0]
+# For a convergence check on selected cases, use [1.0, 1.5, 2.0].
+mesh_scale = [1.0]
+
+[mesh]
+# Roughly 6,100 torso solids. Raise nx/nz for the final mesh-convergence study.
+body_nx = 24
+body_ny = 8
+body_nz = 32
+projectile_subdivisions = 2
+
+[body]
+width_mm = 360.0
+depth_mm = 200.0
+height_mm = 500.0
+density_kg_m3 = 1000.0
+bulk_modulus_mpa = 2200.0
+shear_short_mpa = 10.0
+shear_long_mpa = 3.0
+decay_per_ms = 0.5
+
+[armor.geometry]
+gap_mm = 5.0
+bulge_mm = 20.0
+
+[armor.plate]
+thickness_mm = 2.0
+density_kg_m3 = 7850.0
+youngs_modulus_gpa = 200.0
+poisson = 0.30
+yield_mpa = 350.0
+tangent_modulus_mpa = 1000.0
+failure_strain = 0.20
+
+[armor.dujeong_equivalent]
+# Screening-only homogenized textile/metal panel; replace after coupon calibration.
+thickness_mm = 8.0
+density_kg_m3 = 3500.0
+youngs_modulus_gpa = 30.0
+poisson = 0.30
+yield_mpa = 120.0
+tangent_modulus_mpa = 500.0
+failure_strain = 0.30
+
+[projectile]
+density_kg_m3 = 7200.0
+youngs_modulus_gpa = 120.0
+poisson = 0.25
+standoff_mm = 40.0
+
+[output]
+history_dt_ms = 0.01
+d3plot_dt_ms = 0.05
+termination_ms = 5.0
