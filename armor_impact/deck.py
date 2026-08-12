@@ -205,7 +205,12 @@ def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile
         out.append(_line(*sensor_ids[start:start + 8]))
     out.extend([
         "*DATABASE_HISTORY_SOLID",
-        _line(mesh.history_elements["body_near_impact"], mesh.history_elements["projectile"]),
+        _line(
+            mesh.history_elements["body_near_impact"],
+            mesh.history_elements["body_near_chest"],
+            mesh.history_elements["body_near_abdomen"],
+            mesh.history_elements["projectile"],
+        ),
         "*SECTION_SOLID",
         _line(1, 2),
         "*MAT_VISCOELASTIC",

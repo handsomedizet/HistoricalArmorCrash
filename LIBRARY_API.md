@@ -24,15 +24,32 @@ data = predict_injury(
 - `injury_prediction_ready`: AI API에 전달할 핵심 결과가 준비됐는지 여부
 - `prediction_result`: 후속 AI 채점 전에는 `status="not_scored"`
 
-현재 스키마는 `injury-prediction-input/v2`다. 갑옷 센서 노드가 파손되면
-`armor_peak_ap_displacement_mm`은 삭제 전 이력에서만 계산되고,
-`armor_local_failure_detected`와 `armor_sensor_deletion_time_ms`가 함께 출력된다.
-가속도는 원시 단일 노드 최고값인 `torso_center_peak_acceleration_raw_g`와
-고주파 진동을 줄인 `torso_center_peak_acceleration_3ms_g`를 모두 제공한다.
-대표 키 `torso_center_peak_acceleration_g`는 3 ms 값을 우선 사용한다.
+현재 스키마는 `injury-prediction-input/v3`다. 긴 `units` 표 대신 필드명 suffix와
+`model_context.unit_convention`을 사용한다. 갑옷 센서 노드 또는 추적 요소가 파손되면
+`armor_peak_ap_displacement_mm`은 파손 전 이력에서만 계산되고,
+`armor_local_failure_detected`와 파손 시각·근거가 함께 출력된다. 국부 파손만으로
+관통을 판정하지 않으며, 현재 이력만으로 관통을 확정할 수 없으면
+`armor_perforation_detected=None`으로 유지한다.
+
+가속도는 `torso_response.torso_center_acceleration` 아래에 묶인다. 원시 단일 노드
+피크와 velocity 변화로 계산한 3 ms 벡터 평균 피크를 모두 제공하고, screening에는
+`vector_average_3ms_peak_g`를 우선한다.
 입력 질량이 구경과 명목 재료 밀도로 계산한 구형 질량과 다르면
 `projectile_mass_scale`과 `projectile_effective_density_kg_m3`에 실제 해석에
 사용된 질량 보정값이 기록된다.
+
+v2에서 v3로 바뀐 주요 이름은 다음과 같다.
+
+| v2 | v3 |
+|---|---|
+| `units` | `model_context.unit_convention` |
+| `projectile_energy_change_j` | `projectile_kinetic_energy_loss_j` |
+| `projectile_energy_transfer_fraction` | `projectile_kinetic_energy_loss_fraction` |
+| 흉부 중심 가속도 관련 flat field | `torso_center_acceleration` 객체 |
+
+반환 직전 validation이 비유한값, 필수값 누락, 잘못된 시간·압축률·에너지,
+관통 판정 근거와 prediction 상태의 모순을 검사한다. 치명 오류는
+`simulation_quality.validation_errors`에 기록되고 `injury_prediction_ready=False`가 된다.
 
 갑옷 이름은 `두정갑`, `플레이트`, `없음` 외에 `dujeong`, `plate`, `none`도
 받는다. 기본 입사각과 충돌 위치는 모두 0이며, 필요한 경우 키워드 인자로

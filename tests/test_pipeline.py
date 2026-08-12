@@ -18,6 +18,7 @@ from armor_impact.postprocess import (
     INJURY_INPUTS_FILENAME,
     analyze_case,
     analyze_study,
+    _validate_injury_prediction_input,
     parse_glstat,
     parse_lsdyna_float,
     parse_nodout,
@@ -41,12 +42,25 @@ def write_fixture_case(root: Path) -> None:
             "impact_z_mm": 0.0, "mesh_scale": 1.0,
         },
         "projectile_mass_kg": 2.0,
+        "projectile_material": {
+            "density_kg_m3": 7200.0,
+            "youngs_modulus_gpa": 120.0,
+            "poisson": 0.25,
+            "standoff_mm": 40.0,
+        },
         "body_depth_mm": 200.0,
         "sensors": {
             "impact_front": 1, "impact_back": 2,
             "chest_front": 1, "chest_back": 2,
             "abdomen_front": 1, "abdomen_back": 2,
             "projectile_center": 3, "armor_near_impact": 4, "torso_center": 5,
+        },
+        "history_elements": {
+            "body_near_impact": 101,
+            "body_near_chest": 102,
+            "body_near_abdomen": 103,
+            "armor_near_impact": 201,
+            "projectile": 301,
         },
         "model_limitations": [],
     }
@@ -72,6 +86,8 @@ class ConfigAndDeckTests(unittest.TestCase):
             self.assertGreater(deck.count("*ELEMENT_SOLID"), 0)
             self.assertGreater(float(metadata["projectile_mass_kg"]), 0.0)
             self.assertEqual(len(metadata["sensors"]), 9)
+            self.assertIn("body_near_chest", metadata["history_elements"])
+            self.assertIn("body_near_abdomen", metadata["history_elements"])
 
     def test_build_case_uses_requested_projectile_mass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,7 +129,7 @@ class PublicApiTests(unittest.TestCase):
 
     def test_predict_injury_runs_one_case_and_returns_dictionary(self) -> None:
         payload = {
-            "schema_version": "injury-prediction-input/v2",
+            "schema_version": "injury-prediction-input/v3",
             "case_id": "test-case",
             "injury_prediction_ready": True,
         }
@@ -212,14 +228,32 @@ class ParserAndMetricTests(unittest.TestCase):
             self.assertTrue(math.isclose(result["final_energy_ratio"], 1.0))
             injury_input = result["injury_prediction_input"]
             self.assertTrue(injury_input["injury_prediction_ready"])
-            self.assertEqual(injury_input["schema_version"], "injury-prediction-input/v2")
+            self.assertEqual(injury_input["schema_version"], "injury-prediction-input/v3")
             self.assertEqual(injury_input["prediction_result"]["status"], "not_scored")
+            self.assertNotIn("units", injury_input)
+            self.assertTrue(
+                injury_input["model_context"]["unit_convention"][
+                    "field_units_encoded_in_names"
+                ]
+            )
             self.assertEqual(
                 injury_input["model_context"]["model_type"],
                 "homogeneous_viscoelastic_torso_surrogate",
             )
             self.assertAlmostEqual(
-                injury_input["projectile_response"]["projectile_energy_transfer_fraction"], 0.75
+                injury_input["projectile_response"][
+                    "projectile_kinetic_energy_loss_fraction"
+                ],
+                0.75,
+            )
+            self.assertNotIn("projectile_energy_change_j", injury_input["projectile_response"])
+            self.assertEqual(
+                injury_input["torso_response"]["impact_site"]["measurement_basis"],
+                "paired_single_front_and_back_surface_nodes",
+            )
+            self.assertIn(
+                "torso_center_acceleration",
+                injury_input["torso_response"],
             )
             self.assertAlmostEqual(
                 injury_input["torso_response"]["impact_site"]["max_deflection_mm"], 10.0
@@ -237,10 +271,14 @@ class ParserAndMetricTests(unittest.TestCase):
 
             result = analyze_case(root)
             self.assertIsNone(result["armor_peak_ap_displacement_mm"])
+            self.assertIsNone(result["armor_local_failure_detected"])
             self.assertEqual(
                 result["injury_prediction_input"]["impact_conditions"]["armor_type"],
                 "none",
             )
+            armor = result["injury_prediction_input"]["armor_response"]
+            self.assertIsNone(armor["armor_perforation_detected"])
+            self.assertEqual(armor["armor_perforation_status"], "not_applicable_no_armor")
 
     def test_analyze_case_limits_armor_displacement_to_node_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,7 +293,145 @@ class ParserAndMetricTests(unittest.TestCase):
             self.assertEqual(result["armor_peak_ap_displacement_mm"], 7.0)
             self.assertTrue(result["armor_local_failure_detected"])
             self.assertEqual(result["armor_sensor_deletion_time_ms"], 1.5)
-            self.assertEqual(result["armor_displacement_history_scope"], "pre_erosion")
+            self.assertEqual(result["armor_displacement_history_scope"], "pre_local_failure")
+
+    def test_projectile_element_failure_invalidates_residual_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture_case(root)
+            (root / "solver.log").write_text(
+                "solid element 301 failed at time 1.5000E+00\n",
+                encoding="utf-8",
+            )
+
+            result = analyze_case(root)
+            payload = result["injury_prediction_input"]
+            self.assertIsNone(payload["projectile_response"]["projectile_residual_speed_mps"])
+            self.assertEqual(
+                payload["projectile_response"]["residual_measurement"]["status"],
+                "invalid_tracked_projectile_element_failed",
+            )
+            self.assertFalse(payload["injury_prediction_ready"])
+
+    def test_validation_rejects_nonfinite_required_feature(self) -> None:
+        payload = {
+            "prediction_result": {
+                "status": "not_scored",
+                "injury_probability": None,
+                "injury_severity": None,
+            },
+            "impact_conditions": {
+                "projectile_mass_kg": 2.0,
+                "projectile_mass_scale": 1.0,
+                "impact_speed_mps": 100.0,
+                "projectile_initial_ke_j": 10000.0,
+            },
+            "projectile_response": {
+                "projectile_residual_speed_mps": 50.0,
+                "projectile_residual_ke_j": 2500.0,
+                "projectile_kinetic_energy_loss_j": 7500.0,
+            },
+            "armor_response": {
+                "armor_perforation_detected": None,
+                "displacement_history_scope": "full_parsed_nodout_history",
+            },
+            "torso_response": {
+                "impact_site": {
+                    "max_deflection_mm": float("nan"),
+                    "max_compression_ratio": 0.05,
+                    "peak_vc_mps": 0.2,
+                },
+                "chest": {},
+                "abdomen": {},
+                "torso_center_acceleration": {},
+            },
+            "simulation_quality": {
+                "simulation_duration_ms": 5.0,
+                "warnings": [],
+            },
+            "injury_prediction_ready": True,
+        }
+        validated = _validate_injury_prediction_input(payload)
+        self.assertFalse(validated["injury_prediction_ready"])
+        self.assertIsNone(
+            validated["torso_response"]["impact_site"]["max_deflection_mm"]
+        )
+        self.assertEqual(validated["simulation_quality"]["validation_status"], "failed")
+
+    def test_validation_rejects_not_scored_prediction_with_result(self) -> None:
+        payload = {
+            "prediction_result": {
+                "status": "not_scored",
+                "injury_probability": 0.8,
+                "injury_severity": None,
+            },
+            "impact_conditions": {
+                "projectile_mass_kg": 2.0,
+                "projectile_mass_scale": 1.0,
+                "impact_speed_mps": 100.0,
+                "projectile_initial_ke_j": 10000.0,
+            },
+            "projectile_response": {
+                "projectile_residual_speed_mps": 50.0,
+                "projectile_residual_ke_j": 2500.0,
+                "projectile_kinetic_energy_loss_j": 7500.0,
+            },
+            "armor_response": {"armor_perforation_detected": None},
+            "torso_response": {
+                "impact_site": {
+                    "max_deflection_mm": 10.0,
+                    "max_compression_ratio": 0.05,
+                    "peak_vc_mps": 0.2,
+                },
+                "torso_center_acceleration": {},
+            },
+            "simulation_quality": {"simulation_duration_ms": 5.0, "warnings": []},
+            "injury_prediction_ready": True,
+        }
+        validated = _validate_injury_prediction_input(payload)
+        self.assertFalse(validated["injury_prediction_ready"])
+        self.assertIn(
+            "prediction_result is not_scored",
+            " ".join(validated["simulation_quality"]["validation_errors"]),
+        )
+
+    def test_validation_rejects_measurement_after_simulation(self) -> None:
+        payload = {
+            "prediction_result": {
+                "status": "not_scored",
+                "injury_probability": None,
+                "injury_severity": None,
+            },
+            "impact_conditions": {
+                "projectile_mass_kg": 2.0,
+                "projectile_mass_scale": 1.0,
+                "impact_speed_mps": 100.0,
+                "projectile_initial_ke_j": 10000.0,
+            },
+            "projectile_response": {
+                "projectile_residual_speed_mps": 50.0,
+                "projectile_residual_ke_j": 2500.0,
+                "projectile_kinetic_energy_loss_j": 7500.0,
+            },
+            "armor_response": {"armor_perforation_detected": None},
+            "torso_response": {
+                "impact_site": {
+                    "max_deflection_mm": 10.0,
+                    "max_compression_ratio": 0.05,
+                    "peak_vc_mps": 0.2,
+                    "time_of_peak_vc_ms": 6.0,
+                },
+                "torso_center_acceleration": {},
+            },
+            "simulation_quality": {"simulation_duration_ms": 5.0, "warnings": []},
+            "injury_prediction_ready": True,
+        }
+        validated = _validate_injury_prediction_input(payload)
+        self.assertFalse(validated["injury_prediction_ready"])
+        self.assertIn(
+            "exceeds simulation duration",
+            " ".join(validated["simulation_quality"]["validation_errors"]),
+        )
 
     def test_analyze_study_writes_batch_injury_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

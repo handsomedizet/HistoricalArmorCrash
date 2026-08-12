@@ -203,6 +203,8 @@ def build_mesh(
         sensors["armor_near_impact"] = armor_node_ids[(ix, iz)]
     history_elements = {
         "body_near_impact": element_lookup[(min(ix, nx - 1), 0, min(iz, nz - 1))],
+        "body_near_chest": element_lookup[(min(center_ix, nx - 1), 0, min(chest_iz, nz - 1))],
+        "body_near_abdomen": element_lookup[(min(center_ix, nx - 1), 0, min(abdomen_iz, nz - 1))],
         "projectile": projectile_elements[0][0],
     }
     if include_armor:

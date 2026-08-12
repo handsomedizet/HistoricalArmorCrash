@@ -141,9 +141,9 @@ runs/
 | `max_deflection_mm` | 충돌 위치 전면–후면 노드의 최대 상대변위 |
 | `max_compression_ratio` | 상대변위를 초기 흉복부 깊이로 나눈 값 |
 | `peak_vc_mps` | 압궤율과 압궤속도의 곱인 V*C 대리지표 |
-| `torso_center_peak_acceleration_g` | 대용체 중심 노드의 3 ms 벡터 평균 가속도 피크(이력 부족 시 원시값) |
+| `torso_center_acceleration.vector_average_3ms_peak_g` | 단일 중심 노드 velocity 변화로 계산한 3 ms 벡터 평균 가속도 피크 |
 | `projectile_residual_speed_mps` | 마지막 10% 시점의 대포알 중심 속도 중앙값 |
-| `projectile_energy_change_j` | 초기 운동에너지에서 잔류 운동에너지를 뺀 값 |
+| `projectile_kinetic_energy_loss_j` | 초기 운동에너지에서 잔류 proxy 운동에너지를 뺀 값 |
 | `final_energy_ratio` | GLSTAT의 최종 에너지비 |
 
 V*C와 압궤량이라는 이름을 사용하지만, 이 대용체에서 얻은 값에 자동차 충돌 더미의 상해 임계값을 그대로 적용하면 안 된다. 센서 위치, 필터, 흉곽 구조와 검증 조건이 다르기 때문이다.
