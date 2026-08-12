@@ -1,4 +1,6 @@
 """LS-DYNA armor impact screening pipeline."""
 
-__version__ = "0.1.0"
+from .api import InjuryPredictionError, predict_injury
 
+__all__ = ["InjuryPredictionError", "predict_injury"]
+__version__ = "0.2.0"

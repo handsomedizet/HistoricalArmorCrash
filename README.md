@@ -16,6 +16,19 @@ Windows 로컬 PC에서 구형 대포알이 갑옷을 거쳐 흉부·복부에 �
 - 대포알 잔류속도와 운동에너지 변화 산출
 - GLSTAT 에너지비와 hourglass/internal energy 비율 검사
 - 메시 배율을 이용한 수렴성 해석
+- 갑옷 종류·속도·구경·질량으로 단일 계산을 실행하고 AI 입력용 딕셔너리 반환
+
+## 라이브러리 호출
+
+```python
+from armor_impact import predict_injury
+
+data = predict_injury("두정갑", 250.0, 80.0, 3.8)
+```
+
+필수 인자는 순서대로 갑옷 종류, 탄환 속도(m/s), 구경(mm), 질량(kg)이다.
+갑옷 종류에는 `두정갑`, `플레이트`, `없음`을 사용할 수 있다. 자세한 반환 구조와
+설정 방법은 [LIBRARY_API.md](LIBRARY_API.md)를 참고한다.
 
 ## 1. 빠른 시작
 
@@ -128,7 +141,7 @@ runs/
 | `max_deflection_mm` | 충돌 위치 전면–후면 노드의 최대 상대변위 |
 | `max_compression_ratio` | 상대변위를 초기 흉복부 깊이로 나눈 값 |
 | `peak_vc_mps` | 압궤율과 압궤속도의 곱인 V*C 대리지표 |
-| `torso_center_peak_acceleration_g` | 대용체 중심 노드의 비필터 가속도 피크 |
+| `torso_center_peak_acceleration_g` | 대용체 중심 노드의 3 ms 벡터 평균 가속도 피크(이력 부족 시 원시값) |
 | `projectile_residual_speed_mps` | 마지막 10% 시점의 대포알 중심 속도 중앙값 |
 | `projectile_energy_change_j` | 초기 운동에너지에서 잔류 운동에너지를 뺀 값 |
 | `final_energy_ratio` | GLSTAT의 최종 에너지비 |
@@ -172,4 +185,3 @@ python -m unittest discover -s tests -v
 - [LS-DYNA GLSTAT 에너지 구성](https://lsdyna.ansys.com/total-energy/)
 - [Toyota THUMS 다운로드](https://www.toyota.co.jp/thums/)
 - [Toyota THUMS 모델 구성과 검증 범위](https://www.toyota.co.jp/thums/about/)
-

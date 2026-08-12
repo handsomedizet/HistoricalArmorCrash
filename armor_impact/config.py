@@ -84,18 +84,22 @@ class CaseSpec:
     impact_x_mm: float
     impact_z_mm: float
     mesh_scale: float
+    projectile_mass_kg: float | None = None
 
     @property
     def case_id(self) -> str:
         def token(value: float) -> str:
             return f"{value:g}".replace("-", "m").replace(".", "p")
 
-        return (
+        case_id = (
             f"c{self.index:04d}_{self.armor_type}"
             f"_d{token(self.caliber_mm)}_v{token(self.speed_mps)}"
             f"_y{token(self.yaw_deg)}_p{token(self.pitch_deg)}"
             f"_m{token(self.mesh_scale)}"
         )
+        if self.projectile_mass_kg is not None:
+            case_id += f"_w{token(self.projectile_mass_kg)}"
+        return case_id
 
     @property
     def direction(self) -> tuple[float, float, float]:
@@ -243,7 +247,7 @@ def load_config(path: str | Path) -> StudyConfig:
     impact_z = _float_list(study_raw.get("impact_z_mm", [0.0]), "study.impact_z_mm")
     mesh_scales = _float_list(study_raw.get("mesh_scale", [1.0]), "study.mesh_scale")
 
-    unknown = sorted(set(armor_types) - set(armors))
+    unknown = sorted(set(armor_types) - set(armors) - {"none"})
     if unknown:
         raise ConfigError(f"Unknown armor_types: {', '.join(unknown)}")
 
@@ -273,6 +277,8 @@ def load_config(path: str | Path) -> StudyConfig:
             ("case speed_mps", case.speed_mps),
             ("case mesh_scale", case.mesh_scale),
         ])
+        if case.projectile_mass_kg is not None:
+            _positive([("case projectile_mass_kg", case.projectile_mass_kg)])
         if abs(case.pitch_deg) >= 89.0:
             raise ConfigError("pitch_deg must stay between -89 and +89 degrees")
         if abs(case.impact_x_mm) >= body.width_mm / 2 or abs(case.impact_z_mm) >= body.height_mm / 2:

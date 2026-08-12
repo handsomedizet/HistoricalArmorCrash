@@ -39,9 +39,12 @@ def _armor_surface_y(config: StudyConfig, x_mm: float, z_mm: float) -> float:
 def _projectile_center(config: StudyConfig, case: CaseSpec) -> tuple[float, float, float]:
     direction = case.direction
     radius = case.caliber_mm / 2
+    target_y = -config.body.depth_mm / 2
+    if case.armor_type != "none":
+        target_y = _armor_surface_y(config, case.impact_x_mm, case.impact_z_mm)
     target = (
         case.impact_x_mm,
-        _armor_surface_y(config, case.impact_x_mm, case.impact_z_mm),
+        target_y,
         case.impact_z_mm,
     )
     offset = radius + config.projectile.standoff_mm
@@ -55,6 +58,9 @@ def _projectile_mass_kg(config: StudyConfig, case: CaseSpec) -> float:
 
 def build_case(config: StudyConfig, case: CaseSpec, case_dir: Path) -> dict[str, object]:
     case_dir.mkdir(parents=True, exist_ok=True)
+    has_armor = case.armor_type != "none"
+    if has_armor and case.armor_type not in config.armors:
+        raise ValueError(f"Unknown armor type: {case.armor_type}")
     center = _projectile_center(config, case)
     nx = max(2, round(config.mesh.body_nx * case.mesh_scale))
     ny = max(2, round(config.mesh.body_ny * case.mesh_scale))
@@ -73,17 +79,30 @@ def build_case(config: StudyConfig, case: CaseSpec, case_dir: Path) -> dict[str,
         projectile_subdivisions=config.mesh.projectile_subdivisions,
         impact_x_mm=case.impact_x_mm,
         impact_z_mm=case.impact_z_mm,
+        include_armor=has_armor,
     )
-    projectile_mass = _projectile_mass_kg(config, case)
+    nominal_projectile_mass = _projectile_mass_kg(config, case)
+    projectile_mass = case.projectile_mass_kg
+    if projectile_mass is None:
+        projectile_mass = nominal_projectile_mass
+    if projectile_mass <= 0:
+        raise ValueError("projectile_mass_kg must be greater than zero")
+    projectile_mass_scale = projectile_mass / nominal_projectile_mass
     deck = render_deck(config, case, mesh, projectile_mass)
     (case_dir / "run.k").write_text(deck, encoding="utf-8", newline="\n")
 
     metadata: dict[str, object] = {
         "case": asdict(case),
         "case_id": case.case_id,
+        "run_id": case_dir.name,
         "direction": list(case.direction),
         "projectile_center_mm": list(center),
         "projectile_mass_kg": projectile_mass,
+        "projectile_nominal_mass_kg": nominal_projectile_mass,
+        "projectile_mass_scale": projectile_mass_scale,
+        "projectile_effective_density_kg_m3": (
+            config.projectile.density_kg_m3 * projectile_mass_scale
+        ),
         "projectile_mesh_volume_mm3": mesh.projectile_mesh_volume_mm3,
         "body_depth_mm": config.body.depth_mm,
         "body_dimensions_mm": {
@@ -92,17 +111,22 @@ def build_case(config: StudyConfig, case: CaseSpec, case_dir: Path) -> dict[str,
             "height_mm": config.body.height_mm,
         },
         "body_material": asdict(config.body),
-        "armor_geometry": asdict(config.armor_geometry),
-        "armor_material": asdict(config.armors[case.armor_type]),
+        "armor_geometry": asdict(config.armor_geometry) if has_armor else {},
+        "armor_material": asdict(config.armors[case.armor_type]) if has_armor else None,
         "projectile_material": asdict(config.projectile),
         "mesh_divisions": {"nx": nx, "ny": ny, "nz": nz, "scale": case.mesh_scale},
         "sensors": mesh.sensors,
         "history_elements": mesh.history_elements,
         "model_limitations": [
             "Homogeneous viscoelastic torso surrogate; not a validated human body model.",
-            "Dujeong armor is a homogenized equivalent panel, not discrete plates and textile.",
             "Material values are illustrative defaults and require calibration.",
-        ],
+            "Torso acceleration is measured at a single center node, not the torso center of mass.",
+        ] + ([
+            "Dujeong armor is a homogenized equivalent panel, not discrete plates and textile."
+        ] if case.armor_type == "dujeong_equivalent" else []) + ([
+            "Requested projectile mass differs from the nominal spherical mass; "
+            f"projectile density is scaled by {projectile_mass_scale:.6g}."
+        ] if abs(projectile_mass_scale - 1.0) > 0.01 else []),
     }
     (case_dir / "case.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8", newline="\n"
@@ -138,7 +162,10 @@ def build_study(config: StudyConfig, output_dir: str | Path) -> Path:
 
 
 def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile_mass_kg: float) -> str:
-    armor = config.armors[case.armor_type]
+    has_armor = case.armor_type != "none"
+    armor = config.armors.get(case.armor_type)
+    if has_armor and armor is None:
+        raise ValueError(f"Unknown armor type: {case.armor_type}")
     direction = case.direction
     velocity = tuple(component * case.speed_mps for component in direction)
 
@@ -179,15 +206,8 @@ def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile
     out.extend([
         "*DATABASE_HISTORY_SOLID",
         _line(mesh.history_elements["body_near_impact"], mesh.history_elements["projectile"]),
-        "*DATABASE_HISTORY_SHELL",
-        _line(mesh.history_elements["armor_near_impact"]),
         "*SECTION_SOLID",
         _line(1, 2),
-        "*SECTION_SHELL",
-        _line(2, 16, 0.833333, 5, 0, 0, 0, 1),
-        _line(armor.thickness_mm, armor.thickness_mm, armor.thickness_mm, armor.thickness_mm),
-        "*SECTION_SOLID",
-        _line(3, 10),
         "*MAT_VISCOELASTIC",
         _line(
             1,
@@ -197,17 +217,29 @@ def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile
             config.body.shear_long_mpa / 1000.0,
             config.body.decay_per_ms,
         ),
-        "*MAT_PLASTIC_KINEMATIC",
-        _line(
-            2,
-            armor.density_kg_m3 / 1.0e9,
-            armor.youngs_modulus_gpa,
-            armor.poisson,
-            armor.yield_mpa / 1000.0,
-            armor.tangent_modulus_mpa / 1000.0,
-            1.0,
-        ),
-        _line(0.0, 0.0, armor.failure_strain, 0.0),
+    ])
+    if has_armor and armor is not None:
+        out.extend([
+            "*DATABASE_HISTORY_SHELL",
+            _line(mesh.history_elements["armor_near_impact"]),
+            "*SECTION_SHELL",
+            _line(2, 16, 0.833333, 5, 0, 0, 0, 1),
+            _line(armor.thickness_mm, armor.thickness_mm, armor.thickness_mm, armor.thickness_mm),
+            "*MAT_PLASTIC_KINEMATIC",
+            _line(
+                2,
+                armor.density_kg_m3 / 1.0e9,
+                armor.youngs_modulus_gpa,
+                armor.poisson,
+                armor.yield_mpa / 1000.0,
+                armor.tangent_modulus_mpa / 1000.0,
+                1.0,
+            ),
+            _line(0.0, 0.0, armor.failure_strain, 0.0),
+        ])
+    out.extend([
+        "*SECTION_SOLID",
+        _line(3, 10),
         "*MAT_ELASTIC",
         _line(
             3,
@@ -220,9 +252,14 @@ def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile
         "*PART",
         "Torso surrogate - unvalidated",
         _line(1, 1, 1, 0, 0, 0, 0, 0),
-        "*PART",
-        f"Armor - {case.armor_type}",
-        _line(2, 2, 2, 0, 0, 0, 0, 0),
+    ])
+    if has_armor:
+        out.extend([
+            "*PART",
+            f"Armor - {case.armor_type}",
+            _line(2, 2, 2, 0, 0, 0, 0, 0),
+        ])
+    out.extend([
         "*PART",
         "Cast-iron cannonball approximation",
         _line(3, 3, 3, 0, 0, 0, 0, 0),
@@ -239,9 +276,10 @@ def render_deck(config: StudyConfig, case: CaseSpec, mesh: MeshModel, projectile
         out.append(_line(eid, pid))
         out.append(_line(*conn))
 
-    out.append("*ELEMENT_SHELL")
-    for eid, pid, conn in mesh.armor_elements:
-        out.append(_line(eid, pid, *conn))
+    if has_armor:
+        out.append("*ELEMENT_SHELL")
+        for eid, pid, conn in mesh.armor_elements:
+            out.append(_line(eid, pid, *conn))
 
     out.extend([
         "*CONTACT_ERODING_SINGLE_SURFACE",

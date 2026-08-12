@@ -4,3 +4,5 @@ __pycache__/
 study.toml
 runs/
 demo_runs/
+prediction_runs/
+*.env

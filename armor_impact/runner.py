@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import csv
+import math
 import os
 import re
 import shutil
@@ -53,11 +54,15 @@ def resolve_executable(configured: str) -> Path | None:
 
 
 def solver_command(executable: Path, case_dir: Path, solver: SolverConfig) -> list[str]:
+    name = executable.name.casefold()
+    single_precision = bool(re.search(r"(?:smp|mpp)[_-]s(?:[_\-.]|$)", name))
+    bytes_per_word = 4 if single_precision else 8
+    memory_mwords = max(1, math.ceil(solver.memory_mb / bytes_per_word))
     return [
         str(executable),
         "i=run.k",
         f"ncpus={solver.ncpus}",
-        f"memory={solver.memory_mb}m",
+        f"memory={memory_mwords}m",
     ]
 
 
@@ -82,10 +87,25 @@ def _has_fatal_marker(text: str) -> bool:
     return False
 
 
+def _fatal_message(text: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.search(r"\*{3}\s*Error\s+([^\r\n]+)", line, re.IGNORECASE)
+        if match is None:
+            continue
+        detail = f"LS-DYNA Error {match.group(1).strip()}"
+        for following in lines[index + 1:index + 4]:
+            message = following.strip()
+            if message:
+                return f"{detail}: {message}"
+        return detail
+    return "LS-DYNA reported an input or fatal error"
+
+
 def inspect_case(case_dir: Path, return_code: int | None = None) -> tuple[str, str]:
     text = _read_solver_text(case_dir)
     if _has_fatal_marker(text):
-        return "failed", "LS-DYNA reported an input or fatal error"
+        return "failed", _fatal_message(text)
     if NORMAL_TERMINATION.search(text):
         if (case_dir / "nodout").is_file() or (case_dir / "binout").is_file():
             return "completed", "Normal termination and result output detected"

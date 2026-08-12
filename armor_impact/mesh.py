@@ -91,6 +91,7 @@ def build_mesh(
     projectile_subdivisions: int,
     impact_x_mm: float,
     impact_z_mm: float,
+    include_armor: bool = True,
 ) -> MeshModel:
     nodes: dict[int, Vec3] = {}
     body_elements: list[tuple[int, int, tuple[int, ...]]] = []
@@ -126,31 +127,32 @@ def build_mesh(
 
     next_node = max(nodes) + 1
     armor_node_ids: dict[tuple[int, int], int] = {}
-    for k in range(nz + 1):
-        for i in range(nx + 1):
-            if i in (0, nx) or k in (0, nz):
-                nid = body_node_id(i, 0, k)
-            else:
-                x = xmin + i * dx
-                z = zmin + k * dz
-                shape = math.sin(math.pi * i / nx) * math.sin(math.pi * k / nz)
-                y = ymin - armor_gap_mm - armor_bulge_mm * shape
-                nid = next_node
-                next_node += 1
-                nodes[nid] = (x, y, z)
-            armor_node_ids[(i, k)] = nid
-
     armor_eid = 1_000_001
     armor_element_lookup: dict[tuple[int, int], int] = {}
-    for k in range(nz):
-        for i in range(nx):
-            conn = (
-                armor_node_ids[(i, k)], armor_node_ids[(i + 1, k)],
-                armor_node_ids[(i + 1, k + 1)], armor_node_ids[(i, k + 1)],
-            )
-            armor_elements.append((armor_eid, 2, conn))
-            armor_element_lookup[(i, k)] = armor_eid
-            armor_eid += 1
+    if include_armor:
+        for k in range(nz + 1):
+            for i in range(nx + 1):
+                if i in (0, nx) or k in (0, nz):
+                    nid = body_node_id(i, 0, k)
+                else:
+                    x = xmin + i * dx
+                    z = zmin + k * dz
+                    shape = math.sin(math.pi * i / nx) * math.sin(math.pi * k / nz)
+                    y = ymin - armor_gap_mm - armor_bulge_mm * shape
+                    nid = next_node
+                    next_node += 1
+                    nodes[nid] = (x, y, z)
+                armor_node_ids[(i, k)] = nid
+
+        for k in range(nz):
+            for i in range(nx):
+                conn = (
+                    armor_node_ids[(i, k)], armor_node_ids[(i + 1, k)],
+                    armor_node_ids[(i + 1, k + 1)], armor_node_ids[(i, k + 1)],
+                )
+                armor_elements.append((armor_eid, 2, conn))
+                armor_element_lookup[(i, k)] = armor_eid
+                armor_eid += 1
 
     sphere_vertices, sphere_faces = _icosphere(projectile_subdivisions)
     projectile_center_id = 2_000_001
@@ -195,14 +197,16 @@ def build_mesh(
         "abdomen_front": body_node_id(center_ix, 0, abdomen_iz),
         "abdomen_back": body_node_id(center_ix, ny, abdomen_iz),
         "torso_center": body_node_id(center_ix, center_iy, center_iz),
-        "armor_near_impact": armor_node_ids[(ix, iz)],
         "projectile_center": projectile_center_id,
     }
+    if include_armor:
+        sensors["armor_near_impact"] = armor_node_ids[(ix, iz)]
     history_elements = {
         "body_near_impact": element_lookup[(min(ix, nx - 1), 0, min(iz, nz - 1))],
-        "armor_near_impact": armor_element_lookup[(min(ix, nx - 1), min(iz, nz - 1))],
         "projectile": projectile_elements[0][0],
     }
+    if include_armor:
+        history_elements["armor_near_impact"] = armor_element_lookup[(min(ix, nx - 1), min(iz, nz - 1))]
     return MeshModel(
         nodes=nodes,
         body_elements=body_elements,

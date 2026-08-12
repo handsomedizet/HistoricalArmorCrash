@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import csv
 import json
 import math
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from armor_impact.config import load_config
+from armor_impact import predict_injury
+from armor_impact.api import _resolve_config_path, normalize_armor_type
+from armor_impact.config import SolverConfig, load_config
 from armor_impact.deck import build_case
 from armor_impact.postprocess import (
     INJURY_INPUT_FILENAME,
@@ -18,7 +22,7 @@ from armor_impact.postprocess import (
     parse_lsdyna_float,
     parse_nodout,
 )
-from armor_impact.runner import inspect_case
+from armor_impact.runner import RunResult, inspect_case, solver_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +73,79 @@ class ConfigAndDeckTests(unittest.TestCase):
             self.assertGreater(float(metadata["projectile_mass_kg"]), 0.0)
             self.assertEqual(len(metadata["sensors"]), 9)
 
+    def test_build_case_uses_requested_projectile_mass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = replace(self.config.cases[0], projectile_mass_kg=3.25)
+            metadata = build_case(self.config, case, Path(tmp))
+            self.assertEqual(metadata["projectile_mass_kg"], 3.25)
+            self.assertGreater(metadata["projectile_mass_scale"], 1.0)
+            self.assertGreater(metadata["projectile_effective_density_kg_m3"], 7200.0)
+            self.assertIn("_w3p25", metadata["case_id"])
+
+    def test_build_case_without_armor_omits_armor_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = replace(
+                self.config.cases[0],
+                armor_type="none",
+                projectile_mass_kg=3.25,
+            )
+            metadata = build_case(self.config, case, Path(tmp))
+            deck = (Path(tmp) / "run.k").read_text(encoding="utf-8")
+            self.assertNotIn("*SECTION_SHELL\n", deck)
+            self.assertNotIn("*ELEMENT_SHELL\n", deck)
+            self.assertNotIn("Armor - none", deck)
+            self.assertNotIn("armor_near_impact", metadata["sensors"])
+            self.assertIsNone(metadata["armor_material"])
+
+
+class PublicApiTests(unittest.TestCase):
+    def test_project_study_config_is_used_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "study.toml"
+            expected.write_text("", encoding="utf-8")
+            with patch("armor_impact.api.Path.cwd", return_value=Path(tmp)):
+                self.assertEqual(_resolve_config_path(None), expected)
+
+    def test_armor_names_are_normalized(self) -> None:
+        self.assertEqual(normalize_armor_type("두정갑"), "dujeong_equivalent")
+        self.assertEqual(normalize_armor_type("플레이트"), "plate")
+        self.assertEqual(normalize_armor_type("없음"), "none")
+
+    def test_predict_injury_runs_one_case_and_returns_dictionary(self) -> None:
+        payload = {
+            "schema_version": "injury-prediction-input/v2",
+            "case_id": "test-case",
+            "injury_prediction_ready": True,
+        }
+        run_result = RunResult("test-case", "completed", 0, 0.1, "completed")
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("armor_impact.api.run_case", return_value=run_result),
+                patch(
+                    "armor_impact.api.analyze_case",
+                    return_value={"injury_prediction_input": payload},
+                ),
+            ):
+                result = predict_injury(
+                    "두정갑",
+                    250.0,
+                    80.0,
+                    3.8,
+                    output_dir=tmp,
+                )
+            self.assertIs(result, payload)
+            case_files = list(Path(tmp).glob("*/case.json"))
+            self.assertEqual(len(case_files), 1)
+            metadata = json.loads(case_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(metadata["case"]["armor_type"], "dujeong_equivalent")
+            self.assertEqual(metadata["projectile_mass_kg"], 3.8)
+            self.assertEqual(metadata["run_id"], case_files[0].parent.name)
+            self.assertGreater(metadata["projectile_mass_scale"], 1.0)
+
+    def test_predict_injury_rejects_unknown_armor(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported armor_type"):
+            predict_injury("chainmail", 250.0, 80.0, 3.8)
+
 
 class ParserAndMetricTests(unittest.TestCase):
     def test_fortran_float_without_e(self) -> None:
@@ -80,11 +157,47 @@ class ParserAndMetricTests(unittest.TestCase):
         self.assertAlmostEqual(frames[-1].nodes[1].displacement_mm[1], 15.0)
         self.assertAlmostEqual(frames[-1].nodes[3].velocity_mps[1], 50.0)
 
+    def test_parse_nodout_with_adjacent_negative_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nodout"
+            path.write_text(
+                "n o d a l ( at time 0.0000000E+00 )\n"
+                " 2263 0.00000E+00 0.00000E+00 0.00000E+00 "
+                "0.00000E+00 0.00000E+00 0.00000E+00 "
+                "0.00000E+00 0.00000E+00 0.00000E+00 "
+                "0.00000E+00-1.00000E+02-9.37500E+01\n",
+                encoding="utf-8",
+            )
+            frames = parse_nodout(path)
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].nodes[2263].coordinate_mm, (0.0, -100.0, -93.75))
+
     def test_parse_glstat(self) -> None:
         frames = parse_glstat(FIXTURES / "sample_glstat")
         self.assertEqual(len(frames), 2)
         self.assertAlmostEqual(frames[-1].values["energy_ratio"], 1.0)
         self.assertAlmostEqual(frames[-1].values["hourglass_energy_j"], 10.0)
+
+    def test_parse_glstat_with_dotted_r14_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "glstat"
+            path.write_text(
+                " time...........................   0.00000E+00\n"
+                " time step......................   2.42398E-03\n"
+                " internal energy................   3.90000E+02\n"
+                " hourglass energy ..............   1.00000E+01\n"
+                " eroded internal energy.........   4.00000E+01\n"
+                " eroded hourglass energy........   2.00000E+00\n"
+                " total energy / initial energy..   1.00000E+00\n",
+                encoding="utf-8",
+            )
+            frames = parse_glstat(path)
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].values["internal_energy_j"], 390.0)
+            self.assertEqual(frames[0].values["hourglass_energy_j"], 10.0)
+            self.assertEqual(frames[0].values["eroded_internal_energy_j"], 40.0)
+            self.assertEqual(frames[0].values["eroded_hourglass_energy_j"], 2.0)
+            self.assertEqual(frames[0].values["energy_ratio"], 1.0)
 
     def test_analyze_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,7 +212,8 @@ class ParserAndMetricTests(unittest.TestCase):
             self.assertTrue(math.isclose(result["final_energy_ratio"], 1.0))
             injury_input = result["injury_prediction_input"]
             self.assertTrue(injury_input["injury_prediction_ready"])
-            self.assertEqual(injury_input["schema_version"], "injury-prediction-input/v1")
+            self.assertEqual(injury_input["schema_version"], "injury-prediction-input/v2")
+            self.assertEqual(injury_input["prediction_result"]["status"], "not_scored")
             self.assertEqual(
                 injury_input["model_context"]["model_type"],
                 "homogeneous_viscoelastic_torso_surrogate",
@@ -111,6 +225,37 @@ class ParserAndMetricTests(unittest.TestCase):
                 injury_input["torso_response"]["impact_site"]["max_deflection_mm"], 10.0
             )
             self.assertTrue((root / INJURY_INPUT_FILENAME).is_file())
+
+    def test_analyze_case_without_armor_sensor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture_case(root)
+            metadata = json.loads((root / "case.json").read_text(encoding="utf-8"))
+            metadata["case"]["armor_type"] = "none"
+            metadata["sensors"].pop("armor_near_impact")
+            (root / "case.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            result = analyze_case(root)
+            self.assertIsNone(result["armor_peak_ap_displacement_mm"])
+            self.assertEqual(
+                result["injury_prediction_input"]["impact_conditions"]["armor_type"],
+                "none",
+            )
+
+    def test_analyze_case_limits_armor_displacement_to_node_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture_case(root)
+            (root / "solver.log").write_text(
+                "node number 4 deleted at time 1.5000E+00\n",
+                encoding="utf-8",
+            )
+
+            result = analyze_case(root)
+            self.assertEqual(result["armor_peak_ap_displacement_mm"], 7.0)
+            self.assertTrue(result["armor_local_failure_detected"])
+            self.assertEqual(result["armor_sensor_deletion_time_ms"], 1.5)
+            self.assertEqual(result["armor_displacement_history_scope"], "pre_erosion")
 
     def test_analyze_study_writes_batch_injury_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +276,16 @@ class ParserAndMetricTests(unittest.TestCase):
 
 
 class RunnerInspectionTests(unittest.TestCase):
+    def test_memory_mb_is_converted_to_double_precision_mwords(self) -> None:
+        solver = SolverConfig("", 2, 2048, 120.0)
+        command = solver_command(Path("ls-dyna_smp_d.exe"), Path("case"), solver)
+        self.assertEqual(command[-1], "memory=256m")
+
+    def test_memory_mb_is_converted_to_single_precision_mwords(self) -> None:
+        solver = SolverConfig("", 2, 2048, 120.0)
+        command = solver_command(Path("ls-dyna_smp_s.exe"), Path("case"), solver)
+        self.assertEqual(command[-1], "memory=512m")
+
     def test_normal_termination_is_not_failed_by_option_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -156,7 +311,24 @@ class RunnerInspectionTests(unittest.TestCase):
             (root / "solver.log").write_text("*** Error 10117 (KEY+117)\n", encoding="utf-8")
             self.assertEqual(
                 inspect_case(root),
-                ("failed", "LS-DYNA reported an input or fatal error"),
+                ("failed", "LS-DYNA Error 10117 (KEY+117)"),
+            )
+
+    def test_fatal_marker_includes_solver_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "solver.log").write_text(
+                "*** Error 70023 (OTH+23)\n"
+                "LS-DYNA failed to allocate the requested memory.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                inspect_case(root),
+                (
+                    "failed",
+                    "LS-DYNA Error 70023 (OTH+23): "
+                    "LS-DYNA failed to allocate the requested memory.",
+                ),
             )
 
 

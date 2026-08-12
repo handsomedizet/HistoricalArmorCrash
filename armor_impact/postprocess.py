@@ -12,8 +12,12 @@ from typing import Any, Iterable
 
 FLOAT_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+|[+-]\d{1,3})?"
 TIME_AT_RE = re.compile(rf"at\s+time\s+({FLOAT_PATTERN})", re.IGNORECASE)
-TIME_EQ_RE = re.compile(rf"\btime\s*=\s*({FLOAT_PATTERN})", re.IGNORECASE)
-INJURY_INPUT_SCHEMA_VERSION = "injury-prediction-input/v1"
+TIME_EQ_RE = re.compile(
+    rf"^\s*time(?!\s+step)\s*(?:=|\.+)\s*({FLOAT_PATTERN})",
+    re.IGNORECASE,
+)
+NODE_ROW_RE = re.compile(r"^\s*(\d+)\s+(.*)$")
+INJURY_INPUT_SCHEMA_VERSION = "injury-prediction-input/v2"
 INJURY_INPUT_FILENAME = "injury_prediction_input.json"
 INJURY_INPUTS_FILENAME = "injury_prediction_inputs.jsonl"
 
@@ -26,17 +30,32 @@ INJURY_FEATURE_UNITS = {
     "impact_x_mm": "mm",
     "impact_z_mm": "mm",
     "projectile_mass_kg": "kg",
+    "projectile_nominal_mass_kg": "kg",
+    "projectile_mass_scale": "1",
+    "projectile_effective_density_kg_m3": "kg/m^3",
     "projectile_initial_ke_j": "J",
     "projectile_residual_speed_mps": "m/s",
     "projectile_residual_ke_j": "J",
     "projectile_energy_change_j": "J",
     "projectile_energy_transfer_fraction": "1",
     "armor_peak_ap_displacement_mm": "mm",
+    "armor_sensor_deletion_time_ms": "ms",
     "max_deflection_mm": "mm",
     "max_compression_ratio": "1",
     "peak_vc_mps": "m/s",
+    "time_of_max_deflection_ms": "ms",
+    "time_of_peak_vc_ms": "ms",
     "torso_center_peak_acceleration_g": "g",
+    "torso_center_peak_acceleration_raw_g": "g",
+    "torso_center_peak_acceleration_3ms_g": "g",
+    "final_internal_energy_j": "J",
+    "final_hourglass_energy_j": "J",
+    "final_eroded_kinetic_energy_j": "J",
+    "final_eroded_internal_energy_j": "J",
+    "final_eroded_hourglass_energy_j": "J",
+    "final_sliding_energy_j": "J",
     "final_energy_ratio": "1",
+    "final_energy_ratio_without_eroded": "1",
     "final_hourglass_to_internal_ratio": "1",
 }
 
@@ -88,12 +107,17 @@ def parse_nodout(path: str | Path) -> list[NodalFrame]:
                 flush()
                 current_time = parse_lsdyna_float(time_match.group(1))
                 continue
-            fields = line.split()
-            if current_time is None or len(fields) < 13:
+            if current_time is None:
+                continue
+            row_match = NODE_ROW_RE.match(line)
+            if row_match is None:
+                continue
+            number_tokens = re.findall(FLOAT_PATTERN, row_match.group(2))
+            if len(number_tokens) < 12:
                 continue
             try:
-                node_id = int(fields[0])
-                values = [parse_lsdyna_float(item) for item in fields[1:13]]
+                node_id = int(row_match.group(1))
+                values = [parse_lsdyna_float(item) for item in number_tokens[:12]]
             except ValueError:
                 continue
             current_nodes[node_id] = NodeState(
@@ -107,6 +131,9 @@ def parse_nodout(path: str | Path) -> list[NodalFrame]:
 
 
 ENERGY_LABELS = {
+    "eroded kinetic energy": "eroded_kinetic_energy_j",
+    "eroded internal energy": "eroded_internal_energy_j",
+    "eroded hourglass energy": "eroded_hourglass_energy_j",
     "kinetic energy": "kinetic_energy_j",
     "internal energy": "internal_energy_j",
     "hourglass energy": "hourglass_energy_j",
@@ -140,20 +167,30 @@ def parse_glstat(path: str | Path) -> list[EnergyFrame]:
                 continue
             lowered = " ".join(line.lower().split())
             for label in labels:
-                if label not in lowered:
-                    continue
-                match = re.search(rf"{re.escape(label)}\s*=\s*({FLOAT_PATTERN})", lowered)
+                match = re.match(
+                    rf"^{re.escape(label)}\s*(?:=|\.+)\s*({FLOAT_PATTERN})",
+                    lowered,
+                )
                 if match:
                     values[ENERGY_LABELS[label]] = parse_lsdyna_float(match.group(1))
-                break
+                    break
     flush()
     return frames
 
 
-def _node_series(frames: Iterable[NodalFrame], node_id: int, attribute: str, component: int) -> tuple[list[float], list[float]]:
+def _node_series(
+    frames: Iterable[NodalFrame],
+    node_id: int,
+    attribute: str,
+    component: int,
+    *,
+    max_time_ms: float | None = None,
+) -> tuple[list[float], list[float]]:
     times: list[float] = []
     values: list[float] = []
     for frame in frames:
+        if max_time_ms is not None and frame.time_ms > max_time_ms:
+            continue
         state = frame.nodes.get(node_id)
         if state is None:
             continue
@@ -194,16 +231,52 @@ def _gradient(values: list[float], times_ms: list[float]) -> list[float]:
     return result
 
 
-def _peak_acceleration_g(frames: Iterable[NodalFrame], node_id: int) -> float | None:
-    peaks: list[float] = []
+def _acceleration_metrics(frames: Iterable[NodalFrame], node_id: int) -> dict[str, float | None]:
+    states: list[tuple[float, NodeState]] = []
     for frame in frames:
         state = frame.nodes.get(node_id)
         if state is None:
             continue
+        states.append((frame.time_ms, state))
+
+    raw_peaks: list[float] = []
+    for _, state in states:
         a = state.acceleration_mm_ms2
         magnitude_mm_ms2 = math.sqrt(a[0] ** 2 + a[1] ** 2 + a[2] ** 2)
-        peaks.append(magnitude_mm_ms2 * 1000.0 / 9.80665)
-    return max(peaks) if peaks else None
+        raw_peaks.append(magnitude_mm_ms2 * 1000.0 / 9.80665)
+
+    clip_ms = 3.0
+    clip_peaks: list[float] = []
+    end_index = 1
+    for start_index, (start_time, start_state) in enumerate(states):
+        target_time = start_time + clip_ms
+        while end_index < len(states) and states[end_index][0] < target_time:
+            end_index += 1
+        if end_index >= len(states):
+            break
+        before_time, before_state = states[end_index - 1]
+        after_time, after_state = states[end_index]
+        if after_time == before_time:
+            continue
+        fraction = (target_time - before_time) / (after_time - before_time)
+        end_velocity = tuple(
+            before_state.velocity_mps[i]
+            + fraction * (after_state.velocity_mps[i] - before_state.velocity_mps[i])
+            for i in range(3)
+        )
+        delta_velocity = tuple(
+            end_velocity[i] - start_state.velocity_mps[i] for i in range(3)
+        )
+        average_mm_ms2 = math.sqrt(sum(value ** 2 for value in delta_velocity)) / clip_ms
+        clip_peaks.append(average_mm_ms2 * 1000.0 / 9.80665)
+
+    raw_peak = max(raw_peaks) if raw_peaks else None
+    clip_peak = max(clip_peaks) if clip_peaks else None
+    return {
+        "peak_raw_g": raw_peak,
+        "peak_3ms_g": clip_peak,
+        "preferred_peak_g": clip_peak if clip_peak is not None else raw_peak,
+    }
 
 
 def _residual_speed(frames: list[NodalFrame], node_id: int) -> float | None:
@@ -229,6 +302,8 @@ def _pair_metrics(
             "max_deflection_mm": None,
             "max_compression_ratio": None,
             "peak_vc_mps": None,
+            "time_of_max_deflection_ms": None,
+            "time_of_peak_vc_ms": None,
         }, []
     compression_velocity = _gradient(compression, times)
     ratios = [value / depth_mm for value in compression]
@@ -243,10 +318,16 @@ def _pair_metrics(
         }
         for t, c, r, v, vc_value in zip(times, compression, ratios, compression_velocity, vc)
     ]
+    max_deflection = max(max(compression), 0.0)
+    max_deflection_index = compression.index(max_deflection) if max_deflection > 0 else 0
+    peak_vc = max(vc)
+    peak_vc_index = vc.index(peak_vc)
     return {
-        "max_deflection_mm": max(max(compression), 0.0),
+        "max_deflection_mm": max_deflection,
         "max_compression_ratio": max(max(ratios), 0.0),
-        "peak_vc_mps": max(vc),
+        "peak_vc_mps": peak_vc,
+        "time_of_max_deflection_ms": times[max_deflection_index],
+        "time_of_peak_vc_ms": times[peak_vc_index],
     }, history
 
 
@@ -268,7 +349,24 @@ def _metric_triplet(metrics: dict[str, object], key: str) -> dict[str, object]:
         "max_deflection_mm": values.get("max_deflection_mm"),
         "max_compression_ratio": values.get("max_compression_ratio"),
         "peak_vc_mps": values.get("peak_vc_mps"),
+        "time_of_max_deflection_ms": values.get("time_of_max_deflection_ms"),
+        "time_of_peak_vc_ms": values.get("time_of_peak_vc_ms"),
     }
+
+
+def _node_deletion_time(case_dir: Path, node_id: int) -> float | None:
+    pattern = re.compile(
+        rf"node\s+number\s+{node_id}\s+deleted\s+at\s+time\s+({FLOAT_PATTERN})",
+        re.IGNORECASE,
+    )
+    times: list[float] = []
+    for name in ("solver.log", "messag"):
+        path = case_dir / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        times.extend(parse_lsdyna_float(match.group(1)) for match in pattern.finditer(text))
+    return min(times) if times else None
 
 
 def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str, object]) -> dict[str, object]:
@@ -277,6 +375,51 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
     body_dimensions = _as_dict(metadata.get("body_dimensions_mm"))
     if not body_dimensions and metadata.get("body_depth_mm") is not None:
         body_dimensions = {"depth_mm": metadata.get("body_depth_mm")}
+    body_material = {
+        key: value
+        for key, value in _as_dict(metadata.get("body_material")).items()
+        if key not in {"width_mm", "depth_mm", "height_mm"}
+    }
+    projectile_material = _as_dict(metadata.get("projectile_material"))
+    projectile_material = dict(projectile_material)
+    projectile_nominal_mass = metadata.get("projectile_nominal_mass_kg")
+    projectile_mass_scale = metadata.get("projectile_mass_scale")
+    projectile_effective_density = metadata.get("projectile_effective_density_kg_m3")
+    caliber = metrics.get("caliber_mm", case.get("caliber_mm"))
+    projectile_mass = metrics.get("projectile_mass_kg")
+    nominal_density = projectile_material.get("density_kg_m3")
+    if (
+        not _finite_number(projectile_nominal_mass)
+        and _finite_number(caliber)
+        and _finite_number(nominal_density)
+    ):
+        radius_m = float(caliber) / 2000.0
+        projectile_nominal_mass = (
+            float(nominal_density) * (4.0 / 3.0) * math.pi * radius_m ** 3
+        )
+    if (
+        not _finite_number(projectile_mass_scale)
+        and _finite_number(projectile_mass)
+        and _finite_number(projectile_nominal_mass)
+        and float(projectile_nominal_mass) > 0
+    ):
+        projectile_mass_scale = float(projectile_mass) / float(projectile_nominal_mass)
+    if (
+        not _finite_number(projectile_effective_density)
+        and _finite_number(nominal_density)
+        and _finite_number(projectile_mass_scale)
+    ):
+        projectile_effective_density = float(nominal_density) * float(projectile_mass_scale)
+    projectile_material["effective_density_kg_m3"] = projectile_effective_density
+    projectile_material["mass_scale"] = projectile_mass_scale
+    limitations = list(_as_list(metadata.get("model_limitations")))
+    if _finite_number(projectile_mass_scale) and abs(float(projectile_mass_scale) - 1.0) > 0.01:
+        density_warning = (
+            "Requested projectile mass differs from the nominal spherical mass; "
+            f"projectile density is scaled by {float(projectile_mass_scale):.6g}."
+        )
+        if density_warning not in limitations:
+            limitations.append(density_warning)
     initial_ke = metrics.get("projectile_initial_ke_j")
     transferred = metrics.get("projectile_energy_change_j")
     transfer_fraction = None
@@ -295,28 +438,38 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
     payload: dict[str, object] = {
         "schema_version": INJURY_INPUT_SCHEMA_VERSION,
         "case_id": metrics.get("case_id", metadata.get("case_id")),
+        "run_id": metadata.get("run_id", metrics.get("case_id", metadata.get("case_id"))),
         "prediction_task": "thoracoabdominal_injury_risk_screening",
+        "prediction_result": {
+            "status": "not_scored",
+            "injury_probability": None,
+            "injury_severity": None,
+            "note": "Simulation features are ready; downstream AI scoring has not been performed.",
+        },
         "model_context": {
             "model_type": "homogeneous_viscoelastic_torso_surrogate",
             "screening_only": bool(metrics.get("screening_only", True)),
             "surrogate_geometry": body_dimensions,
-            "body_material": _as_dict(metadata.get("body_material")),
+            "body_material": body_material,
             "armor_geometry": _as_dict(metadata.get("armor_geometry")),
             "armor_material": _as_dict(metadata.get("armor_material")),
-            "projectile_material": _as_dict(metadata.get("projectile_material")),
-            "limitations": _as_list(metadata.get("model_limitations")),
+            "projectile_material": projectile_material,
+            "limitations": limitations,
         },
         "units": INJURY_FEATURE_UNITS,
         "impact_conditions": {
             "armor_type": metrics.get("armor_type", case.get("armor_type")),
-            "caliber_mm": metrics.get("caliber_mm", case.get("caliber_mm")),
+            "caliber_mm": caliber,
             "impact_speed_mps": initial_speed,
             "yaw_deg": metrics.get("yaw_deg", case.get("yaw_deg")),
             "pitch_deg": metrics.get("pitch_deg", case.get("pitch_deg")),
             "impact_x_mm": metrics.get("impact_x_mm", case.get("impact_x_mm")),
             "impact_z_mm": metrics.get("impact_z_mm", case.get("impact_z_mm")),
             "mesh_scale": metrics.get("mesh_scale", case.get("mesh_scale")),
-            "projectile_mass_kg": metrics.get("projectile_mass_kg"),
+            "projectile_mass_kg": projectile_mass,
+            "projectile_nominal_mass_kg": projectile_nominal_mass,
+            "projectile_mass_scale": projectile_mass_scale,
+            "projectile_effective_density_kg_m3": projectile_effective_density,
             "projectile_initial_ke_j": initial_ke,
         },
         "projectile_response": {
@@ -329,6 +482,9 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
         },
         "armor_response": {
             "armor_peak_ap_displacement_mm": metrics.get("armor_peak_ap_displacement_mm"),
+            "armor_local_failure_detected": metrics.get("armor_local_failure_detected"),
+            "armor_sensor_deletion_time_ms": metrics.get("armor_sensor_deletion_time_ms"),
+            "displacement_history_scope": metrics.get("armor_displacement_history_scope"),
         },
         "torso_response": {
             "body_depth_mm": metrics.get("body_depth_mm", metadata.get("body_depth_mm")),
@@ -336,10 +492,29 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
             "chest": _metric_triplet(metrics, "chest"),
             "abdomen": _metric_triplet(metrics, "abdomen"),
             "torso_center_peak_acceleration_g": metrics.get("torso_center_peak_acceleration_g"),
+            "torso_center_peak_acceleration_raw_g": metrics.get(
+                "torso_center_peak_acceleration_raw_g"
+            ),
+            "torso_center_peak_acceleration_3ms_g": metrics.get(
+                "torso_center_peak_acceleration_3ms_g"
+            ),
+            "torso_center_acceleration_basis": "single_center_node",
+            "torso_center_acceleration_preferred_metric": metrics.get(
+                "torso_center_acceleration_preferred_metric"
+            ),
         },
         "simulation_quality": {
             "analysis_status": metrics.get("analysis_status"),
+            "final_internal_energy_j": metrics.get("final_internal_energy_j"),
+            "final_hourglass_energy_j": metrics.get("final_hourglass_energy_j"),
+            "final_eroded_kinetic_energy_j": metrics.get("final_eroded_kinetic_energy_j"),
+            "final_eroded_internal_energy_j": metrics.get("final_eroded_internal_energy_j"),
+            "final_eroded_hourglass_energy_j": metrics.get("final_eroded_hourglass_energy_j"),
+            "final_sliding_energy_j": metrics.get("final_sliding_energy_j"),
             "final_energy_ratio": metrics.get("final_energy_ratio"),
+            "final_energy_ratio_without_eroded": metrics.get(
+                "final_energy_ratio_without_eroded"
+            ),
             "final_hourglass_to_internal_ratio": metrics.get("final_hourglass_to_internal_ratio"),
             "warnings": _as_list(metrics.get("warnings")),
         },
@@ -409,8 +584,21 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
     residual_ke = 0.5 * mass * residual ** 2 if residual is not None else None
     transferred = initial_ke - residual_ke if residual_ke is not None else None
 
-    armor_times, armor_disp = _node_series(frames, sensors["armor_near_impact"], "displacement_mm", 1)
+    armor_sensor = sensors.get("armor_near_impact")
+    armor_deletion_time = None
+    armor_disp: list[float] = []
+    if armor_sensor is not None:
+        armor_deletion_time = _node_deletion_time(root, armor_sensor)
+        _, armor_disp = _node_series(
+            frames,
+            armor_sensor,
+            "displacement_mm",
+            1,
+            max_time_ms=armor_deletion_time,
+        )
     armor_peak = max((max(armor_disp), 0.0)) if armor_disp else None
+
+    acceleration = _acceleration_metrics(frames, sensors["torso_center"])
 
     energy_frames = parse_glstat(root / "glstat") if (root / "glstat").is_file() else []
     final_energy = energy_frames[-1].values if energy_frames else {}
@@ -430,6 +618,22 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
         warnings.append(f"Final energy ratio deviates from 1.0 by {abs(energy_ratio - 1.0):.1%}.")
     if hourglass_fraction is not None and hourglass_fraction > 0.10:
         warnings.append(f"Hourglass/internal energy ratio is high ({hourglass_fraction:.1%}).")
+    if armor_deletion_time is not None:
+        warnings.append(
+            f"Armor sensor node eroded at {armor_deletion_time:g} ms; "
+            "armor displacement is limited to pre-erosion history."
+        )
+    raw_acceleration = acceleration["peak_raw_g"]
+    clip_acceleration = acceleration["peak_3ms_g"]
+    if (
+        raw_acceleration is not None
+        and clip_acceleration is not None
+        and raw_acceleration > 5.0 * max(clip_acceleration, 1.0e-12)
+    ):
+        warnings.append(
+            "Raw torso-center nodal acceleration contains high-frequency spikes; "
+            "the 3 ms vector-average value is preferred for screening."
+        )
 
     result: dict[str, object] = {
         "case_id": metadata["case_id"],
@@ -450,11 +654,28 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
         "projectile_residual_ke_j": residual_ke,
         "projectile_energy_change_j": transferred,
         "armor_peak_ap_displacement_mm": armor_peak,
+        "armor_local_failure_detected": armor_deletion_time is not None,
+        "armor_sensor_deletion_time_ms": armor_deletion_time,
+        "armor_displacement_history_scope": (
+            "pre_erosion" if armor_deletion_time is not None else "full_simulation"
+        ) if armor_sensor is not None else "not_applicable",
         "impact_site": local,
         "chest": chest,
         "abdomen": abdomen,
-        "torso_center_peak_acceleration_g": _peak_acceleration_g(frames, sensors["torso_center"]),
+        "torso_center_peak_acceleration_g": acceleration["preferred_peak_g"],
+        "torso_center_peak_acceleration_raw_g": raw_acceleration,
+        "torso_center_peak_acceleration_3ms_g": clip_acceleration,
+        "torso_center_acceleration_preferred_metric": (
+            "3_ms_vector_average" if clip_acceleration is not None else "raw_nodal_peak"
+        ),
+        "final_internal_energy_j": internal_energy,
+        "final_hourglass_energy_j": hourglass_energy,
+        "final_eroded_kinetic_energy_j": final_energy.get("eroded_kinetic_energy_j"),
+        "final_eroded_internal_energy_j": final_energy.get("eroded_internal_energy_j"),
+        "final_eroded_hourglass_energy_j": final_energy.get("eroded_hourglass_energy_j"),
+        "final_sliding_energy_j": final_energy.get("sliding_energy_j"),
         "final_energy_ratio": energy_ratio,
+        "final_energy_ratio_without_eroded": final_energy.get("energy_ratio_without_eroded"),
         "final_hourglass_to_internal_ratio": hourglass_fraction,
         "warnings": warnings,
     }
@@ -515,9 +736,27 @@ def analyze_study(study_dir: str | Path) -> Path:
                 ),
                 "abdomen_peak_vc_mps": abdomen.get("peak_vc_mps") if isinstance(abdomen, dict) else None,
                 "torso_center_peak_acceleration_g": result.get("torso_center_peak_acceleration_g"),
+                "torso_center_peak_acceleration_raw_g": result.get(
+                    "torso_center_peak_acceleration_raw_g"
+                ),
+                "torso_center_peak_acceleration_3ms_g": result.get(
+                    "torso_center_peak_acceleration_3ms_g"
+                ),
+                "armor_peak_ap_displacement_mm": result.get("armor_peak_ap_displacement_mm"),
+                "armor_local_failure_detected": result.get("armor_local_failure_detected"),
+                "armor_sensor_deletion_time_ms": result.get("armor_sensor_deletion_time_ms"),
                 "projectile_residual_speed_mps": result.get("projectile_residual_speed_mps"),
                 "projectile_energy_change_j": result.get("projectile_energy_change_j"),
+                "final_internal_energy_j": result.get("final_internal_energy_j"),
+                "final_hourglass_energy_j": result.get("final_hourglass_energy_j"),
+                "final_eroded_internal_energy_j": result.get("final_eroded_internal_energy_j"),
                 "final_energy_ratio": result.get("final_energy_ratio"),
+                "final_energy_ratio_without_eroded": result.get(
+                    "final_energy_ratio_without_eroded"
+                ),
+                "final_hourglass_to_internal_ratio": result.get(
+                    "final_hourglass_to_internal_ratio"
+                ),
                 "warnings": " | ".join(result.get("warnings", [])),
             })
     with summary_path.open("w", encoding="utf-8-sig", newline="") as handle:
