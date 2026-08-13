@@ -1,48 +1,126 @@
-import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-def make(x_data, y_data, interval=10):
-    # 2. 플롯 및 객체 초기화
-    fig, ax = plt.subplots(figsize=(6, 6))
 
-    # 누적되는 선(line)과 현재 위치를 나타낼 점(point) 생성
-    line, = ax.plot([], [], lw=2, color='blue', label='Trajectory')
-    point, = ax.plot([], [], 'ro', ms=8, label='Current Pos') # 빨간 점
+def animate_point(
+    positions,
+    dt=0.01,
+    save_path=None,
+    show=True,
+    trail=True,
+    point_size=8,
+):
+    """
+    프레임별 좌표를 받아 점의 움직임을 애니메이션으로 출력한다.
 
-    # 데이터의 최솟값/최댓값을 기준으로 축 범위 자동 고정
-    ax.set_xlim(np.min(x_data) - 0.5, np.max(x_data) + 0.5)
-    ax.set_ylim(np.min(y_data) - 0.5, np.max(y_data) + 0.5)
-    ax.grid(True)
-    ax.legend()
+    positions:
+        [(x0, y0), (x1, y1), ...]
+        각 원소가 한 프레임의 점 좌표.
 
-    # 3. 초기화 함수
-    def init():
-        line.set_data([], [])
-        point.set_data([], [])
-        return line, point
+    dt:
+        프레임 간 시간(초). 기본값 0.01초.
 
-    # 4. 프레임 업데이트 함수
-    def update(frame):
-        # frame 변수는 0부터 (전체 데이터 개수 - 1)까지 1씩 증가합니다.
-        
-        # 현재 프레임까지의 데이터를 잘라서 선으로 연결 (누적 효과)
-        line.set_data(x_data[:frame], y_data[:frame])
-        
-        # 현재 프레임의 단일 x, y 좌표에 점 찍기
-        point.set_data([x_data[frame]], [y_data[frame]])
-        
-        return line, point
+    save_path:
+        저장할 파일 경로.
+        예: "result.mp4"
+        None이면 저장하지 않음.
 
-    # 5. 애니메이션 객체 생성
-    # interval=10 은 10ms(0.01초)마다 프레임을 업데이트하라는 뜻입니다.
-    ani = FuncAnimation(
-        fig, 
-        update, 
-        frames=len(x_data), 
-        init_func=init, 
-        blit=True, 
-        interval=10
+    show:
+        True면 애니메이션 창 출력.
+
+    trail:
+        True면 점이 지나간 경로 표시.
+    """
+
+    if len(positions) == 0:
+        raise ValueError("positions가 비어 있습니다.")
+
+    xs = [p[0] for p in positions]
+    ys = [p[1] for p in positions]
+
+    fig, ax = plt.subplots()
+
+    point, = ax.plot([], [], "o", markersize=point_size)
+
+    if trail:
+        path, = ax.plot([], [], "-", alpha=0.5)
+    else:
+        path = None
+
+    # 화면 범위 계산
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    x_range = max_x - min_x
+    y_range = max_y - min_y
+
+    # 모든 좌표가 같아 범위가 0이 되는 경우 방지
+    if x_range == 0:
+        x_range = 1
+
+    if y_range == 0:
+        y_range = 1
+
+    margin_x = x_range * 0.1
+    margin_y = y_range * 0.1
+
+    ax.set_xlim(
+        min_x - margin_x,
+        max_x + margin_x
     )
 
-    plt.show()
+    ax.set_ylim(
+        min_y - margin_y,
+        max_y + margin_y
+    )
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid()
+
+    def init():
+        point.set_data([], [])
+
+        if path is not None:
+            path.set_data([], [])
+            return point, path
+
+        return (point,)
+
+    def update(frame):
+        x, y = positions[frame]
+
+        point.set_data([x], [y])
+
+        if path is not None:
+            path.set_data(
+                xs[:frame + 1],
+                ys[:frame + 1]
+            )
+
+            return point, path
+
+        return (point,)
+
+    animation = FuncAnimation(
+        fig,
+        update,
+        frames=len(positions),
+        init_func=init,
+        interval=dt * 1000,
+        blit=True,
+        repeat=False
+    )
+
+    if save_path is not None:
+        fps = round(1 / dt)
+
+        animation.save(
+            save_path,
+            writer="ffmpeg",
+            fps=fps
+        )
+
+    if show:
+        plt.show()
+
+    return animation

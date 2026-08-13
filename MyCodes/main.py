@@ -1,9 +1,10 @@
 # 계산 파트 (직접 코딩)
 
 import matplotlib.pyplot as plt
-import MakeAnimation
+from MakeAnimation import animate_point
 import math
-from injury_ai import analyze_injury_with_gemini
+# from injury_ai import analyze_injury_with_gemini
+from ContentPrinter import OutputTranslation
 
 def make_plot(func, range_start, range_end, steps):
     answer = []
@@ -16,7 +17,7 @@ def make_plot(func, range_start, range_end, steps):
 
 def get_accerelation(func, range_start, range_end, steps, g = 9.8, a = 0.01):
     answer = []
-    x=range_start
+    x=range_start 
     for i in range(steps):
         x += (range_end - range_start) / steps
         x_1 = x + a
@@ -61,21 +62,21 @@ def get_positions(func, range_start, range_end, g = 9.8, dx = 0.01,deltaTime = 0
     return answer
 
 def test_function(x):
-    return x**3 * -0.1
+    return x**2
 
-plt.plot(make_plot(test_function, -10, 10, 100))
-plt.plot(get_accerelation(test_function, -10, 10, 100))
+# plt.plot(make_plot(test_function, -10, 10, 100))
+# plt.plot(get_accerelation(test_function, -10, 10, 100))
 # plt.show()
 
-datas = get_positions(test_function, -10, 10)
+datas = get_positions(test_function, -3, 3)
 
 print(get_velocity(test_function, -10, 10)[-1])
 print(math.sqrt(2*9.8*abs(test_function(10) - test_function(-10))))
 
 # MakeAnimation.make(datas, make_plot(test_function, -10, 10, len(datas)), 10)
+animate_point([(i, test_function(i)) for i in datas])
 
-
-
+exit()
 
 # LS-dyna 활용 시뮬레이션 파트(라이브러리는 AI 제작, 여기 코드는 직접 코딩)
 import os
@@ -98,5 +99,6 @@ simulation_result = data
 
 result = analyze_injury_with_gemini(simulation_result)
 
-print(result)
+OutputTranslation(result)
+
 plt.show()
