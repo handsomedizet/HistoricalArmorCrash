@@ -13,6 +13,9 @@ import time
 from .config import SolverConfig
 
 
+LS_DYNA_EXECUTABLE_ENV_VAR = "LS_DYNA_EXECUTABLE"
+
+
 NORMAL_TERMINATION = re.compile(
     r"normal\s+termination|n\s*o\s*r\s*m\s*a\s*l\s+t\s*e\s*r\s*m\s*i\s*n\s*a\s*t\s*i\s*o\s*n",
     re.IGNORECASE,
@@ -36,8 +39,46 @@ class RunResult:
     message: str
 
 
+def _dotenv_value(name: str) -> str:
+    """Read one value from the nearest project .env without extra dependencies."""
+    candidates = (Path.cwd() / ".env", Path(__file__).resolve().parents[1] / ".env")
+    visited: set[Path] = set()
+    for candidate in candidates:
+        path = candidate.resolve()
+        if path in visited:
+            continue
+        visited.add(path)
+        try:
+            lines = path.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[7:].lstrip()
+            key, separator, value = stripped.partition("=")
+            if separator and key.strip() == name:
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value.strip()
+    return ""
+
+
+def configured_executable(configured: str = "") -> str:
+    """Return the LS-DYNA setting, preferring environment-based configuration."""
+    value = (
+        os.environ.get(LS_DYNA_EXECUTABLE_ENV_VAR, "").strip()
+        or _dotenv_value(LS_DYNA_EXECUTABLE_ENV_VAR)
+        or configured.strip()
+    )
+    return os.path.expandvars(value.strip().strip('"'))
+
+
 def resolve_executable(configured: str) -> Path | None:
-    value = os.path.expandvars(configured.strip().strip('"'))
+    value = configured_executable(configured)
     if value:
         path = Path(value).expanduser()
         if path.is_file():
@@ -119,8 +160,9 @@ def inspect_case(case_dir: Path, return_code: int | None = None) -> tuple[str, s
 
 def run_case(case_dir: Path, solver: SolverConfig, *, dry_run: bool = False) -> RunResult:
     executable = resolve_executable(solver.executable)
-    if dry_run and executable is None and solver.executable.strip():
-        executable = Path(os.path.expandvars(solver.executable.strip().strip('"'))).expanduser()
+    configured = configured_executable(solver.executable)
+    if dry_run and executable is None and configured:
+        executable = Path(configured).expanduser()
     if executable is None:
         return RunResult(case_dir.name, "blocked", None, 0.0, "LS-DYNA executable was not found")
     command = solver_command(executable, case_dir, solver)

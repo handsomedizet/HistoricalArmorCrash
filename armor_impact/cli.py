@@ -36,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Estimated torso solids per case: {config.mesh.body_nx * config.mesh.body_ny * config.mesh.body_nz}")
         print(f"LS-DYNA executable: {executable if executable else 'NOT FOUND'}")
         if executable is None:
-            print("Set solver.executable in study.toml before running; build and dry-run still work.")
+            print(
+                "Set LS_DYNA_EXECUTABLE in .env (or solver.executable in study.toml); "
+                "build and dry-run still work."
+            )
             return 1
         return 0
 

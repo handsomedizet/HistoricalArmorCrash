@@ -136,7 +136,7 @@ data = armor_impact.predict_injury(
     armor.value,  # 두정갑 / 플레이트 / 없음
     graph_velocity_y[-1],     # 속도 m/s
     caliber,   # 구경 mm
-    weight     # 질량 kg
+    weight,     # 질량 kg
 )
 print(data)
 

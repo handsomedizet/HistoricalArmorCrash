@@ -23,7 +23,7 @@ from armor_impact.postprocess import (
     parse_lsdyna_float,
     parse_nodout,
 )
-from armor_impact.runner import RunResult, inspect_case, solver_command
+from armor_impact.runner import RunResult, inspect_case, resolve_executable, solver_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -452,6 +452,24 @@ class ParserAndMetricTests(unittest.TestCase):
 
 
 class RunnerInspectionTests(unittest.TestCase):
+    def test_resolve_executable_reads_project_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "ls-dyna_smp_d.exe"
+            executable.write_bytes(b"")
+            (root / ".env").write_text(
+                f'LS_DYNA_EXECUTABLE="{executable}"\n',
+                encoding="utf-8",
+            )
+            with (
+                patch.dict("os.environ", {"LS_DYNA_EXECUTABLE": ""}),
+                patch("armor_impact.runner.Path.cwd", return_value=root),
+            ):
+                self.assertEqual(
+                    resolve_executable(r"C:\ignored\lsdyna.exe"),
+                    executable.resolve(),
+                )
+
     def test_memory_mb_is_converted_to_double_precision_mwords(self) -> None:
         solver = SolverConfig("", 2, 2048, 120.0)
         command = solver_command(Path("ls-dyna_smp_d.exe"), Path("case"), solver)

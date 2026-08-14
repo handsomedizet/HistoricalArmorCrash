@@ -1,7 +1,8 @@
-# Copy this file to study.toml and edit the solver path and study inputs.
+# Copy this file to study.toml and edit the study inputs.
+# Set the solver path as LS_DYNA_EXECUTABLE in the project-root .env file.
 
 [solver]
-executable = "C:\\LS-DYNA\\ls-dyna_smp_d.exe"
+executable = ""
 ncpus = 2
 memory_mb = 2048
 timeout_minutes = 120

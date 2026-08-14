@@ -41,15 +41,14 @@ Copy-Item study.example.toml study.toml
 python pipeline.py doctor --config study.toml
 ```
 
-`study.toml`에서 실제 LS-DYNA 실행 파일 경로를 지정한다.
+프로젝트 루트의 `.env`에서 실제 LS-DYNA 실행 파일 경로를 지정한다.
 
-```toml
-[solver]
-executable = "C:\\LS-DYNA\\ls-dyna_smp_d.exe"
-ncpus = 2
-memory_mb = 2048
-timeout_minutes = 120
+```dotenv
+LS_DYNA_EXECUTABLE=C:\LS-DYNA\ls-dyna_smp_d.exe
 ```
+
+프로세스 환경변수, `.env`, `study.toml`의 `solver.executable`, 시스템 `PATH`
+순서로 실행 파일을 찾는다.
 
 입력 덱을 생성하고 실행한다.
 

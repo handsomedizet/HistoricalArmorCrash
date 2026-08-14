@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path $Config)) {
     Copy-Item "study.example.toml" $Config
-    Write-Host "Created $Config. Set solver.executable, then run this command again."
+    Write-Host "Created $Config. Set LS_DYNA_EXECUTABLE in .env, then run this command again."
     exit 1
 }
 

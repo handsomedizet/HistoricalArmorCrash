@@ -55,9 +55,10 @@ v2에서 v3로 바뀐 주요 이름은 다음과 같다.
 받는다. 기본 입사각과 충돌 위치는 모두 0이며, 필요한 경우 키워드 인자로
 `yaw_deg`, `pitch_deg`, `impact_x_mm`, `impact_z_mm`, `mesh_scale`을 지정할 수 있다.
 
-함수는 현재 작업 폴더나 프로젝트 루트의 `study.toml`을 자동으로 사용한다. 설정이
-없을 때만 패키지 기본값으로 시스템 경로에서 LS-DYNA를 찾는다. 별도 설정을 사용할
-때는 `config_path="다른설정.toml"` 또는 `ARMOR_IMPACT_CONFIG` 환경변수를 지정할 수
-있다. 실행 파일을 찾지 못하거나 계산 결과가 불완전하면 `InjuryPredictionError`를
+함수는 현재 작업 폴더나 프로젝트 루트의 `study.toml`을 자동으로 사용한다. LS-DYNA
+실행 파일은 프로세스 환경변수 또는 프로젝트 루트 `.env`의
+`LS_DYNA_EXECUTABLE`로 지정하며, 없을 때만 `study.toml` 설정과 시스템 경로를 찾는다.
+별도 설정을 사용할 때는 `config_path="다른설정.toml"` 또는 `ARMOR_IMPACT_CONFIG`
+환경변수를 지정할 수 있다. 실행 파일을 찾지 못하거나 계산 결과가 불완전하면 `InjuryPredictionError`를
 발생시킨다. 반환값은 균질 흉복부 대리 모델의 선별용 결과이며, 임상 진단이나 검증된
 인체 상해 확률이 아니다.
