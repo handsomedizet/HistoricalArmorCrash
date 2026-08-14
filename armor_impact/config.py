@@ -41,8 +41,7 @@ class BodyConfig:
 
 
 @dataclass(frozen=True)
-class ArmorMaterial:
-    name: str
+class ShellMaterial:
     thickness_mm: float
     density_kg_m3: float
     youngs_modulus_gpa: float
@@ -53,9 +52,26 @@ class ArmorMaterial:
 
 
 @dataclass(frozen=True)
+class ArmorMaterial(ShellMaterial):
+    name: str
+    construction: str
+    wrap_mode: str
+    plate_width_mm: float | None
+    plate_height_mm: float | None
+    plate_gap_mm: float | None
+    reinforcement: ShellMaterial | None
+
+    @property
+    def reference_thickness_mm(self) -> float:
+        if self.reinforcement is None:
+            return self.thickness_mm
+        return max(self.thickness_mm, self.reinforcement.thickness_mm)
+
+
+@dataclass(frozen=True)
 class ArmorGeometry:
     gap_mm: float
-    bulge_mm: float
+    cross_section: str
 
 
 @dataclass(frozen=True)
@@ -153,16 +169,43 @@ def _str_list(value: Any, label: str) -> list[str]:
     return list(value)
 
 
+def _shell_material(raw: dict[str, Any], context: str) -> ShellMaterial:
+    return ShellMaterial(
+        thickness_mm=float(_required(raw, "thickness_mm", context)),
+        density_kg_m3=float(_required(raw, "density_kg_m3", context)),
+        youngs_modulus_gpa=float(_required(raw, "youngs_modulus_gpa", context)),
+        poisson=float(_required(raw, "poisson", context)),
+        yield_mpa=float(_required(raw, "yield_mpa", context)),
+        tangent_modulus_mpa=float(_required(raw, "tangent_modulus_mpa", context)),
+        failure_strain=float(_required(raw, "failure_strain", context)),
+    )
+
+
 def _armor_material(name: str, raw: dict[str, Any]) -> ArmorMaterial:
+    context = f"armor.{name}"
+    base = _shell_material(raw, context)
+    construction = str(raw.get("construction", "continuous_plate"))
+    wrap_mode = str(raw.get("wrap_mode", "front_half"))
+    reinforcement_raw = raw.get("reinforcement")
+    reinforcement: ShellMaterial | None = None
+    if reinforcement_raw is not None:
+        if not isinstance(reinforcement_raw, dict):
+            raise ConfigError(f"[{context}.reinforcement] must be a TOML table")
+        reinforcement = _shell_material(reinforcement_raw, f"{context}.reinforcement")
+
+    def optional_float(key: str) -> float | None:
+        value = raw.get(key)
+        return None if value is None else float(value)
+
     return ArmorMaterial(
+        **base.__dict__,
         name=name,
-        thickness_mm=float(_required(raw, "thickness_mm", f"armor.{name}")),
-        density_kg_m3=float(_required(raw, "density_kg_m3", f"armor.{name}")),
-        youngs_modulus_gpa=float(_required(raw, "youngs_modulus_gpa", f"armor.{name}")),
-        poisson=float(_required(raw, "poisson", f"armor.{name}")),
-        yield_mpa=float(_required(raw, "yield_mpa", f"armor.{name}")),
-        tangent_modulus_mpa=float(_required(raw, "tangent_modulus_mpa", f"armor.{name}")),
-        failure_strain=float(_required(raw, "failure_strain", f"armor.{name}")),
+        construction=construction,
+        wrap_mode=wrap_mode,
+        plate_width_mm=optional_float("plate_width_mm"),
+        plate_height_mm=optional_float("plate_height_mm"),
+        plate_gap_mm=optional_float("plate_gap_mm"),
+        reinforcement=reinforcement,
     )
 
 
@@ -210,8 +253,8 @@ def load_config(path: str | Path) -> StudyConfig:
     if not isinstance(geom_raw, dict):
         raise ConfigError("[armor.geometry] must be a TOML table")
     armor_geometry = ArmorGeometry(
-        gap_mm=float(geom_raw.get("gap_mm", 5.0)),
-        bulge_mm=float(geom_raw.get("bulge_mm", 20.0)),
+        gap_mm=float(geom_raw.get("gap_mm", 1.0)),
+        cross_section=str(geom_raw.get("cross_section", "elliptical")),
     )
     armors: dict[str, ArmorMaterial] = {}
     for name, value in armor_raw.items():
@@ -234,7 +277,7 @@ def load_config(path: str | Path) -> StudyConfig:
     output = OutputConfig(
         history_dt_ms=float(output_raw.get("history_dt_ms", 0.01)),
         d3plot_dt_ms=float(output_raw.get("d3plot_dt_ms", 0.05)),
-        termination_ms=float(output_raw.get("termination_ms", 5.0)),
+        termination_ms=float(output_raw.get("termination_ms", 30.0)),
     )
 
     study_raw = _section(data, "study")
@@ -271,6 +314,49 @@ def load_config(path: str | Path) -> StudyConfig:
         ("output.d3plot_dt_ms", output.d3plot_dt_ms),
         ("output.termination_ms", output.termination_ms),
     ])
+    if armor_geometry.gap_mm < 0:
+        raise ConfigError(
+            "armor.geometry.gap_mm is a physical surface clearance and cannot be negative"
+        )
+    if armor_geometry.cross_section != "elliptical":
+        raise ConfigError("armor.geometry.cross_section currently supports only 'elliptical'")
+    for name, armor in armors.items():
+        _positive([
+            (f"armor.{name}.thickness_mm", armor.thickness_mm),
+            (f"armor.{name}.density_kg_m3", armor.density_kg_m3),
+            (f"armor.{name}.youngs_modulus_gpa", armor.youngs_modulus_gpa),
+        ])
+        if armor.construction not in {"continuous_plate", "riveted_discrete_plates"}:
+            raise ConfigError(
+                f"armor.{name}.construction must be 'continuous_plate' or "
+                "'riveted_discrete_plates'"
+            )
+        if armor.wrap_mode not in {"front_half", "full_wrap"}:
+            raise ConfigError(
+                f"armor.{name}.wrap_mode must be 'front_half' or 'full_wrap'"
+            )
+        if armor.construction == "riveted_discrete_plates":
+            if armor.reinforcement is None:
+                raise ConfigError(
+                    f"[{name}] riveted_discrete_plates requires "
+                    f"[armor.{name}.reinforcement]"
+                )
+            pattern_values = {
+                "plate_width_mm": armor.plate_width_mm,
+                "plate_height_mm": armor.plate_height_mm,
+                "plate_gap_mm": armor.plate_gap_mm,
+            }
+            for key, value in pattern_values.items():
+                if value is None or value <= 0:
+                    raise ConfigError(f"armor.{name}.{key} must be greater than zero")
+            _positive([
+                (f"armor.{name}.reinforcement.thickness_mm", armor.reinforcement.thickness_mm),
+                (f"armor.{name}.reinforcement.density_kg_m3", armor.reinforcement.density_kg_m3),
+                (
+                    f"armor.{name}.reinforcement.youngs_modulus_gpa",
+                    armor.reinforcement.youngs_modulus_gpa,
+                ),
+            ])
     for case in cases:
         _positive([
             ("case caliber_mm", case.caliber_mm),

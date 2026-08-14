@@ -16,6 +16,10 @@ from armor_impact.deck import build_case
 from armor_impact.postprocess import (
     INJURY_INPUT_FILENAME,
     INJURY_INPUTS_FILENAME,
+    NodalFrame,
+    NodeState,
+    _pair_metrics,
+    _residual_speed_metrics,
     analyze_case,
     analyze_study,
     _validate_injury_prediction_input,
@@ -74,12 +78,29 @@ class ConfigAndDeckTests(unittest.TestCase):
     def test_case_expansion(self) -> None:
         self.assertEqual(len(self.config.cases), 8)
         self.assertEqual(self.config.cases[0].direction, (0.0, 1.0, 0.0))
+        self.assertEqual(self.config.output.termination_ms, 30.0)
+        self.assertEqual(self.config.output.history_dt_ms, 0.01)
+        self.assertEqual(self.config.armor_geometry.gap_mm, 1.0)
+        self.assertEqual(self.config.armor_geometry.cross_section, "elliptical")
+        self.assertEqual(
+            self.config.armors["dujeong_equivalent"].construction,
+            "riveted_discrete_plates",
+        )
+        self.assertIsNotNone(self.config.armors["dujeong_equivalent"].reinforcement)
 
     def test_build_case_contains_required_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             metadata = build_case(self.config, self.config.cases[0], Path(tmp))
             deck = (Path(tmp) / "run.k").read_text(encoding="utf-8")
             self.assertIn("*CONTACT_ERODING_SINGLE_SURFACE\n", deck)
+            self.assertIn("*SET_PART_LIST\n900001\n1,2,3\n", deck)
+            self.assertIn(
+                "*CONTACT_ERODING_SINGLE_SURFACE\n900001,0,2,0,0,0,0,0\n",
+                deck,
+            )
+            self.assertIn("*CONTROL_TERMINATION\n30\n", deck)
+            self.assertIn("*DATABASE_NODOUT\n0.01,1\n", deck)
+            self.assertIn("*CONTROL_CONTACT\n", deck)
             self.assertIn("*DATABASE_HISTORY_NODE\n", deck)
             self.assertIn("*MAT_VISCOELASTIC\n", deck)
             self.assertIn("*INITIAL_VELOCITY_NODE\n", deck)
@@ -88,6 +109,62 @@ class ConfigAndDeckTests(unittest.TestCase):
             self.assertEqual(len(metadata["sensors"]), 9)
             self.assertIn("body_near_chest", metadata["history_elements"])
             self.assertIn("body_near_abdomen", metadata["history_elements"])
+            self.assertEqual(metadata["simulation_duration_ms"], 30.0)
+            self.assertEqual(metadata["armor_torso_contact_status"], "configured")
+            geometry = metadata["armor_torso_geometry"]
+            self.assertEqual(geometry["initial_penetration_status"], "clear")
+            self.assertAlmostEqual(
+                geometry["torso_anterior_node_at_impact_mm"][1], -100.0
+            )
+            self.assertAlmostEqual(
+                geometry["armor_mid_surface_node_at_impact_mm"][1], -102.0
+            )
+            self.assertGreaterEqual(
+                geometry["surface_clearance_range_mm"]["minimum"], 0.0
+            )
+            self.assertLessEqual(
+                geometry["surface_clearance_range_mm"]["maximum"], 1.0 + 1.0e-9
+            )
+            self.assertEqual(geometry["body_cross_section"], "elliptical_structured_solid")
+            self.assertEqual(
+                metadata["armor_construction"]["wrap_mode"], "front_half"
+            )
+
+    def test_dujeong_uses_discrete_iron_and_textile_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = next(
+                case
+                for case in self.config.cases
+                if case.armor_type == "dujeong_equivalent"
+            )
+            metadata = build_case(self.config, case, Path(tmp))
+            deck = (Path(tmp) / "run.k").read_text(encoding="utf-8")
+            construction = metadata["armor_construction"]
+            self.assertEqual(construction["construction"], "riveted_discrete_plates")
+            self.assertEqual(construction["wrap_mode"], "full_wrap")
+            self.assertEqual(construction["part_roles"]["2"], "textile_gap")
+            self.assertEqual(construction["part_roles"]["4"], "internal_iron_plate")
+            self.assertGreater(construction["reinforcement_area_fraction"], 0.5)
+            self.assertLess(construction["reinforcement_area_fraction"], 0.8)
+            self.assertLess(
+                construction["mean_areal_density_kg_m2"],
+                15.7,
+            )
+            self.assertEqual(
+                metadata["armor_torso_geometry"]["armor_part_role_at_impact"],
+                "internal_iron_plate",
+            )
+            self.assertIn("*SET_PART_LIST\n900001\n1,2,4,3\n", deck)
+            self.assertIn("Dujeong internal iron plates - discrete sections", deck)
+
+    def test_build_case_rejects_missing_armor_contact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("armor_impact.deck.render_deck", return_value="*KEYWORD\n*END\n"):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "no valid armor-torso contact definition",
+                ):
+                    build_case(self.config, self.config.cases[0], Path(tmp))
 
     def test_build_case_uses_requested_projectile_mass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +189,8 @@ class ConfigAndDeckTests(unittest.TestCase):
             self.assertNotIn("Armor - none", deck)
             self.assertNotIn("armor_near_impact", metadata["sensors"])
             self.assertIsNone(metadata["armor_material"])
+            self.assertEqual(metadata["armor_torso_contact_status"], "not_applicable")
+            self.assertIn("*SET_PART_LIST\n900001\n1,3\n", deck)
 
 
 class PublicApiTests(unittest.TestCase):
@@ -148,6 +227,7 @@ class PublicApiTests(unittest.TestCase):
                     80.0,
                     3.8,
                     output_dir=tmp,
+                    simulation_duration_ms=7.5,
                 )
             self.assertIs(result, payload)
             case_files = list(Path(tmp).glob("*/case.json"))
@@ -157,13 +237,43 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(metadata["projectile_mass_kg"], 3.8)
             self.assertEqual(metadata["run_id"], case_files[0].parent.name)
             self.assertGreater(metadata["projectile_mass_scale"], 1.0)
+            self.assertEqual(metadata["simulation_duration_ms"], 7.5)
+            deck = (case_files[0].parent / "run.k").read_text(encoding="utf-8")
+            self.assertIn("*CONTROL_TERMINATION\n7.5\n", deck)
 
     def test_predict_injury_rejects_unknown_armor(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported armor_type"):
             predict_injury("chainmail", 250.0, 80.0, 3.8)
 
+    def test_predict_injury_rejects_invalid_duration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "simulation_duration_ms"):
+            predict_injury("없음", 250.0, 80.0, 3.8, simulation_duration_ms=0.0)
+
 
 class ParserAndMetricTests(unittest.TestCase):
+    @staticmethod
+    def _node_state(displacement_y: float, velocity_y: float = 0.0) -> NodeState:
+        return NodeState(
+            displacement_mm=(0.0, displacement_y, 0.0),
+            velocity_mps=(0.0, velocity_y, 0.0),
+            acceleration_mm_ms2=(0.0, 0.0, 0.0),
+            coordinate_mm=(0.0, 0.0, 0.0),
+        )
+
+    def test_metrics_include_response_after_five_ms(self) -> None:
+        frames = [
+            NodalFrame(0.0, {1: self._node_state(0.0), 2: self._node_state(0.0), 3: self._node_state(0.0, 100.0)}),
+            NodalFrame(5.0, {1: self._node_state(2.0), 2: self._node_state(0.0), 3: self._node_state(0.0, 80.0)}),
+            NodalFrame(10.0, {1: self._node_state(20.0), 2: self._node_state(0.0), 3: self._node_state(0.0, 50.0)}),
+            NodalFrame(30.0, {1: self._node_state(15.0), 2: self._node_state(0.0), 3: self._node_state(0.0, 40.0)}),
+        ]
+        pair, _ = _pair_metrics(frames, 1, 2, 200.0)
+        residual = _residual_speed_metrics(frames, 3, None, None)
+        self.assertEqual(pair["max_deflection_mm"], 20.0)
+        self.assertEqual(pair["time_of_max_deflection_ms"], 10.0)
+        self.assertEqual(residual["window_end_ms"], 30.0)
+        self.assertEqual(residual["speed_mps"], 40.0)
+
     def test_fortran_float_without_e(self) -> None:
         self.assertAlmostEqual(parse_lsdyna_float("1.25000-3"), 0.00125)
 
@@ -433,6 +543,29 @@ class ParserAndMetricTests(unittest.TestCase):
             " ".join(validated["simulation_quality"]["validation_errors"]),
         )
 
+    def test_configured_duration_is_not_treated_as_measurement_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_fixture_case(root)
+            metadata = json.loads((root / "case.json").read_text(encoding="utf-8"))
+            metadata["simulation_duration_ms"] = 2.0001
+            metadata["output_controls"] = {"history_dt_ms": 0.01}
+            metadata["armor_torso_contact"] = {
+                "status": "configured",
+                "part_ids": [1, 2, 3],
+                "torso_part_id": 1,
+                "armor_part_id": 2,
+            }
+            (root / "case.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            payload = analyze_case(root)["injury_prediction_input"]
+            errors = payload["simulation_quality"]["validation_errors"]
+            self.assertNotIn(
+                "configured_simulation_duration_ms",
+                " ".join(errors),
+            )
+            self.assertTrue(payload["injury_prediction_ready"])
+
     def test_analyze_study_writes_batch_injury_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -444,6 +577,11 @@ class ParserAndMetricTests(unittest.TestCase):
 
             summary = analyze_study(root)
             self.assertTrue(summary.is_file())
+            with summary.open("r", encoding="utf-8-sig", newline="") as handle:
+                summary_row = next(csv.DictReader(handle))
+            self.assertIn("simulation_duration_ms", summary_row)
+            self.assertIn("configured_simulation_duration_ms", summary_row)
+            self.assertIn("armor_torso_contact_status", summary_row)
             lines = (root / INJURY_INPUTS_FILENAME).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
             payload = json.loads(lines[0])

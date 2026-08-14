@@ -88,12 +88,12 @@ def test_function(x):
     return x**3 * -0.01
 
 # 값 입력
-startX = -10
+startX = -5
 endX = 3
-expr = 'x**2'
-armor = ArmorType.NoArmor
-caliber = 1800.0 # mm
-weight = 99999 # kg
+expr = 'x**2 - 2*x + 1'
+armor = ArmorType.Plate
+caliber = 100 # mm
+weight = 2 # kg
 
 x = Symbol('x')
 expr = sympify(expr)
@@ -137,6 +137,7 @@ data = armor_impact.predict_injury(
     graph_velocity_y[-1],     # 속도 m/s
     caliber,   # 구경 mm
     weight,     # 질량 kg
+    simulation_duration_ms=5,
 )
 print(data)
 

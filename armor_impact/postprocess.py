@@ -403,6 +403,26 @@ def _as_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _configured_armor_contact_status(metadata: dict[str, object]) -> str:
+    case = _as_dict(metadata.get("case"))
+    if case.get("armor_type") == "none":
+        return "not_applicable"
+    contact = _as_dict(metadata.get("armor_torso_contact"))
+    part_ids = contact.get("part_ids")
+    armor_part_ids = contact.get("armor_part_ids", [contact.get("armor_part_id")])
+    if (
+        contact.get("status") == "configured"
+        and isinstance(part_ids, list)
+        and {1, 2}.issubset(part_ids)
+        and contact.get("torso_part_id") == 1
+        and isinstance(armor_part_ids, list)
+        and 2 in armor_part_ids
+        and set(armor_part_ids).issubset(part_ids)
+    ):
+        return "configured"
+    return "missing"
+
+
 def _as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
 
@@ -583,7 +603,10 @@ def _validate_injury_prediction_input(payload: dict[str, object]) -> dict[str, o
                     if float(child) < 0:
                         validation_errors.append(f"Negative time value at {child_path}.")
                     elif (
-                        key != "simulation_duration_ms"
+                        key not in {
+                            "simulation_duration_ms",
+                            "configured_simulation_duration_ms",
+                        }
                         and _finite_number(duration)
                         and float(child) > float(duration) + 1.0e-6
                     ):
@@ -755,7 +778,9 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
             "surrogate_geometry": body_dimensions,
             "body_material": body_material,
             "armor_geometry": _as_dict(metadata.get("armor_geometry")),
+            "armor_torso_geometry": _as_dict(metadata.get("armor_torso_geometry")),
             "armor_material": _as_dict(metadata.get("armor_material")),
+            "armor_torso_contact": _as_dict(metadata.get("armor_torso_contact")),
             "projectile_material": projectile_material,
             "metric_definitions": METRIC_DEFINITIONS,
             "measurement_provenance": {
@@ -880,6 +905,10 @@ def build_injury_prediction_input(metadata: dict[str, object], metrics: dict[str
         "simulation_quality": {
             "analysis_status": metrics.get("analysis_status"),
             "simulation_duration_ms": metrics.get("simulation_duration_ms"),
+            "configured_simulation_duration_ms": metrics.get(
+                "configured_simulation_duration_ms"
+            ),
+            "armor_torso_contact_status": metrics.get("armor_torso_contact_status"),
             "nodout_parse_status": metrics.get("nodout_parse_status"),
             "glstat_parse_status": metrics.get("glstat_parse_status"),
             "energy_accounting_basis": "final parsed global LS-DYNA GLSTAT frame",
@@ -931,6 +960,13 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
     root = Path(case_dir)
     metadata = json.loads((root / "case.json").read_text(encoding="utf-8"))
     metadata.setdefault("run_id", root.name)
+    configured_duration = metadata.get("simulation_duration_ms")
+    armor_torso_contact_status = _configured_armor_contact_status(metadata)
+    contact_warnings = (
+        ["Armor is enabled but case metadata has no valid armor-torso contact definition."]
+        if armor_torso_contact_status == "missing"
+        else []
+    )
     nodout_path = root / "nodout"
     if not nodout_path.is_file():
         initial_speed = float(metadata["case"]["speed_mps"])
@@ -951,11 +987,14 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
             "projectile_initial_ke_j": 0.5 * mass * initial_speed ** 2,
             "body_depth_mm": metadata.get("body_depth_mm"),
             "simulation_duration_ms": None,
+            "configured_simulation_duration_ms": configured_duration,
+            "armor_torso_contact_status": armor_torso_contact_status,
             "nodout_parse_status": "missing",
             "glstat_parse_status": (
                 "not_parsed_without_nodout" if (root / "glstat").is_file() else "missing"
             ),
             "warnings": list(metadata.get("model_limitations", []))
+            + contact_warnings
             + ["NODOUT was not found; run the solver with ASCII output enabled."],
         }
         _write_case_outputs(root, metadata, result)
@@ -1138,6 +1177,7 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
     simulation_duration = max(duration_candidates) if duration_candidates else None
 
     warnings: list[str] = list(metadata.get("model_limitations", []))
+    warnings.extend(contact_warnings)
     if not frames:
         warnings.append("NODOUT was present but no nodal frames could be parsed.")
     if energy_ratio is None:
@@ -1165,6 +1205,20 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
         warnings.append(
             f"Torso acceleration sensor node eroded at {torso_acceleration_deletion_time:g} ms; "
             "acceleration metrics are limited to pre-erosion history."
+        )
+    output_controls = _as_dict(metadata.get("output_controls"))
+    history_dt = output_controls.get("history_dt_ms")
+    duration_tolerance = (
+        max(1.0e-6, 1.5 * float(history_dt)) if _finite_number(history_dt) else 1.0e-6
+    )
+    if (
+        _finite_number(configured_duration)
+        and simulation_duration is not None
+        and simulation_duration + duration_tolerance < float(configured_duration)
+    ):
+        warnings.append(
+            "Parsed history ended before the configured termination time "
+            f"({simulation_duration:g} ms < {float(configured_duration):g} ms)."
         )
     raw_acceleration = acceleration["peak_raw_g"]
     clip_acceleration = acceleration["peak_3ms_g"]
@@ -1225,6 +1279,8 @@ def analyze_case(case_dir: str | Path) -> dict[str, object]:
         ),
         "torso_acceleration_sensor_deletion_time_ms": torso_acceleration_deletion_time,
         "simulation_duration_ms": simulation_duration,
+        "configured_simulation_duration_ms": configured_duration,
+        "armor_torso_contact_status": armor_torso_contact_status,
         "nodout_parse_status": "parsed" if frames else "parse_failed_or_empty",
         "glstat_parse_status": glstat_parse_status,
         "energy_field_status": energy_field_status,
@@ -1272,6 +1328,13 @@ def analyze_study(study_dir: str | Path) -> Path:
                     injury_input.get("injury_prediction_ready") if isinstance(injury_input, dict) else False
                 ),
                 "armor_type": result.get("armor_type"),
+                "simulation_duration_ms": result.get("simulation_duration_ms"),
+                "configured_simulation_duration_ms": result.get(
+                    "configured_simulation_duration_ms"
+                ),
+                "armor_torso_contact_status": result.get(
+                    "armor_torso_contact_status"
+                ),
                 "caliber_mm": result.get("caliber_mm"),
                 "impact_speed_mps": result.get("impact_speed_mps"),
                 "yaw_deg": result.get("yaw_deg"),

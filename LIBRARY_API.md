@@ -11,6 +11,7 @@ data = predict_injury(
     250.0,          # 탄환 속도 (m/s)
     80.0,           # 탄환 구경 (mm)
     3.8,            # 탄환 무게 (kg)
+    simulation_duration_ms=10.0,  # 이 실행에 적용할 LS-DYNA 해석 시간
 )
 ```
 
@@ -54,6 +55,9 @@ v2에서 v3로 바뀐 주요 이름은 다음과 같다.
 갑옷 이름은 `두정갑`, `플레이트`, `없음` 외에 `dujeong`, `plate`, `none`도
 받는다. 기본 입사각과 충돌 위치는 모두 0이며, 필요한 경우 키워드 인자로
 `yaw_deg`, `pitch_deg`, `impact_x_mm`, `impact_z_mm`, `mesh_scale`을 지정할 수 있다.
+`simulation_duration_ms`를 지정하면 해당 실행 한 건의 종료 시간을 덮어쓴다. 생략하면
+`study.toml`의 `output.termination_ms`를 사용한다. 빠른 동작 확인은 5~10 ms로 줄일 수
+있지만, 갑옷 접촉 뒤 늦게 나타나는 몸통 응답까지 포함하는 최종 해석에는 30 ms를 권장한다.
 
 함수는 현재 작업 폴더나 프로젝트 루트의 `study.toml`을 자동으로 사용한다. LS-DYNA
 실행 파일은 프로세스 환경변수 또는 프로젝트 루트 `.env`의

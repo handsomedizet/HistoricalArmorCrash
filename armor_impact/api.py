@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 import os
 from pathlib import Path
@@ -96,6 +97,7 @@ def predict_injury(
     impact_x_mm: float = 0.0,
     impact_z_mm: float = 0.0,
     mesh_scale: float = 1.0,
+    simulation_duration_ms: float | None = None,
 ) -> dict[str, Any]:
     """Run one LS-DYNA case and return a JSON-serializable AI input dictionary.
 
@@ -120,6 +122,12 @@ def predict_injury(
 
     config_source = _resolve_config_path(config_path)
     config = load_config(config_source)
+    if simulation_duration_ms is not None:
+        duration = _positive_number("simulation_duration_ms", simulation_duration_ms)
+        config = replace(
+            config,
+            output=replace(config.output, termination_ms=duration),
+        )
     if normalized_armor != "none" and normalized_armor not in config.armors:
         raise ValueError(
             f"Armor material {normalized_armor!r} is missing from {config_source}"
